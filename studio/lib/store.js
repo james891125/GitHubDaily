@@ -78,44 +78,99 @@ export function outputPath(name) {
 
 // ---- 設定（含金鑰，只存在本機，檔案權限 600）----
 const DEFAULT_SETTINGS = {
-  provider: "anthropic",
+  provider: "anthropic", // 文字 AI 供應商：anthropic、openai、openrouter、gemini、deepseek、groq、ollama、custom
   anthropicKey: "",
   claudeModel: "claude-opus-5-5",
   effort: "",
   openaiKey: "",
-  openaiBase: "https://api.openai.com/v1",
-  openaiModel: "gpt-4o-mini",
-  embedModel: "",
+  openaiModel: "",
+  openrouterKey: "",
+  openrouterModel: "",
+  geminiKey: "",
+  geminiModel: "",
+  deepseekKey: "",
+  deepseekModel: "",
+  groqKey: "",
+  groqModel: "",
+  ollamaBase: "http://localhost:11434/v1",
+  ollamaModel: "",
+  customBase: "",
+  customKey: "",
+  customModel: "",
+  speechProvider: "", // 語音轉文字：openai、groq、gemini、openrouter、custom
+  speechModel: "",
+  imageProvider: "", // 圖片生成：openai、gemini、openrouter、custom
+  imageModel: "",
   webhookUrl: "",
   elsevierKey: "",
   elsevierInstToken: "",
   usageMode: "economy", // economy：機械性工作降低思考深度；quality：一律使用設定的思考深度
   cacheDays: 7, // AI 回應快取天數，0 = 不快取
 };
+const SECRET = /(Key|Token)$/;
+const OFFICIAL_OPENAI = /^https:\/\/api\.openai\.com\/v1\/?$/;
+
+/** 舊版設定（provider: "openai" + openaiBase）轉換為新版 */
+function migrate(raw) {
+  const s = { ...raw };
+  if (s.openaiBase !== undefined) {
+    if (!OFFICIAL_OPENAI.test(s.openaiBase || "") && s.openaiBase) {
+      s.customBase ||= s.openaiBase;
+      s.customKey ||= s.openaiKey || "";
+      s.customModel ||= s.openaiModel || "";
+      if (s.provider === "openai") s.provider = "custom";
+      s.openaiKey = s.openaiKey && s.customKey === s.openaiKey ? "" : s.openaiKey;
+      s.openaiModel = s.openaiModel && s.customModel === s.openaiModel ? "" : s.openaiModel;
+    }
+    delete s.openaiBase;
+  }
+  return s;
+}
 
 export function getSettings() {
+  const stored = migrate(load("settings", {}));
   return {
     ...DEFAULT_SETTINGS,
-    ...load("settings", {}),
-    ...(process.env.ANTHROPIC_API_KEY && !load("settings", {}).anthropicKey ? { anthropicKey: process.env.ANTHROPIC_API_KEY } : {}),
+    ...stored,
+    ...(process.env.ANTHROPIC_API_KEY && !stored.anthropicKey ? { anthropicKey: process.env.ANTHROPIC_API_KEY } : {}),
   };
 }
 
-export function saveSettings(patch) {
-  const cur = load("settings", {});
+export function saveSettings(patch = {}) {
+  const cur = migrate(load("settings", {}));
+  patch = { ...patch };
+  // 相容舊版欄位（openaiBase / openaiKey / openaiModel）：
+  // 網址不是 OpenAI 官方 → 屬於「其他 OpenAI 相容服務」(custom)
+  const legacyBase = patch.openaiBase;
+  delete patch.openaiBase;
+  const targetProvider = patch.provider ?? cur.provider;
+  // 只有舊版用戶端（送 openaiBase，或沒有送任何 custom 欄位）才套用轉換；新版設定頁會分別送出各家欄位
+  const legacyClient = legacyBase !== undefined || !["customKey", "customModel", "customBase"].some((k) => k in patch);
+  const toCustom = legacyClient && (legacyBase !== undefined ? !!legacyBase && !OFFICIAL_OPENAI.test(legacyBase) : targetProvider === "custom");
+  if (toCustom) {
+    if (legacyBase) patch.customBase = legacyBase;
+    if ("openaiKey" in patch) patch.customKey = patch.openaiKey;
+    if ("openaiModel" in patch) patch.customModel = patch.openaiModel;
+    delete patch.openaiKey;
+    delete patch.openaiModel;
+    if (patch.provider === "openai") patch.provider = "custom";
+  }
   const next = { ...cur };
   for (const [k, v] of Object.entries(patch)) {
     if (!(k in DEFAULT_SETTINGS)) continue;
     // 前端傳回遮罩過的金鑰代表「不變更」
-    if (/(Key|Token)$/.test(k) && typeof v === "string" && v.includes("•")) continue;
-    next[k] = v;
+    if (SECRET.test(k) && typeof v === "string" && v.includes("•")) continue;
+    next[k] = typeof v === "string" ? v.trim() : v;
   }
   save("settings", next, { secret: true });
   return getSettings();
 }
 
-const mask = (k) => (k ? `${k.slice(0, 6)}••••${k.slice(-4)}` : "");
+// 只顯示頭尾少量字元；太短的金鑰完全遮蔽
+const mask = (k) => (!k ? "" : k.length < 16 ? "••••••••" : `${k.slice(0, 4)}••••${k.slice(-4)}`);
 export function publicSettings() {
   const s = getSettings();
-  return { ...s, anthropicKey: mask(s.anthropicKey), openaiKey: mask(s.openaiKey), elsevierKey: mask(s.elsevierKey), elsevierInstToken: mask(s.elsevierInstToken) };
+  const out = { ...s };
+  for (const k of Object.keys(out)) if (SECRET.test(k)) out[k] = mask(out[k]);
+  return out;
 }

@@ -3,11 +3,12 @@ import ExcelJS from "exceljs";
 import { generate, generateJson } from "./llm.js";
 import { splitForProcessing } from "./docs.js";
 import { getSettings } from "./store.js";
+import { chatConfig } from "./providers.js";
 
 // 每次呼叫處理的字數上限：越大呼叫次數越少。Claude 有 100 萬 token 上下文與 12.8 萬輸出，
 // 可一次處理很長的內容；OpenAI 相容服務的輸出上限通常較小，所以保守一點。
 export function chunkLimits() {
-  const claude = getSettings().provider !== "openai";
+  const claude = chatConfig(getSettings()).kind === "anthropic";
   return claude
     ? { translate: 14000, summarizeSingle: 300000, summarizePart: 120000, extract: 80000 }
     : { translate: 6000, summarizeSingle: 60000, summarizePart: 30000, extract: 24000 };

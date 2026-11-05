@@ -7,17 +7,19 @@
 //   file  ：原始檔案（給文字辨識、資料分析），值為檔案庫 id
 //   kb    ：知識庫
 // ai：none＝不使用 AI（不花用量）／light＝少量／normal＝一般／claude＝需要 Claude
+//     speech＝需要語音轉文字服務／imagegen＝需要圖片生成服務
 
 export const CATEGORIES = [
   { id: "office", name: "文書行政", desc: "公文、會議紀錄、信件、校對、摘要、比對" },
   { id: "research", name: "學術研究", desc: "文獻搜尋、論文翻譯、文獻回顧、引用格式" },
   { id: "docs", name: "文件與資料", desc: "文字辨識、翻譯、擷取表格、資料分析、格式轉換" },
+  { id: "media", name: "影音與圖片", desc: "錄音轉逐字稿、會議錄音整理、圖片分析、AI 生成圖片、簡報講稿" },
   { id: "web", name: "網站與資訊", desc: "網站檢測、網頁監控、新聞摘要、網路研究" },
 ];
 
 const FORMAL_SYSTEM = "你是熟悉中華民國（臺灣）政府與學校行政作業的文書人員。一律使用臺灣慣用的繁體中文與正式書面用語，不使用簡體字或中國大陸用語。";
 
-const DOC_SOURCES = { label: "文件來源", type: "doc", required: true, help: "可上傳檔案（PDF、Word、Excel、TXT、HTML）、從檔案庫選擇、貼上文字或輸入網址" };
+const DOC_SOURCES = { label: "文件來源", type: "doc", required: true, help: "可上傳檔案（PDF、Word、Excel、PowerPoint、OpenDocument、RTF、EPUB、Email、TXT、HTML 等）、從檔案庫選擇、貼上文字或輸入網址" };
 
 export const SERVICES = [
   // ======================= 文書行政 =======================
@@ -344,6 +346,142 @@ export const SERVICES = [
     nodes: [
       { id: "t", type: "set", value: "{{form.doc}}", out: "text" },
       { id: "save", type: "save_file", source: "{{text}}", format: "md", filename: "{{form.doc.name}}", out: "file" },
+    ],
+  },
+
+  // ======================= 影音與圖片 =======================
+  {
+    id: "transcribe",
+    cat: "media",
+    name: "錄音轉逐字稿",
+    desc: "將會議、訪談、課堂、演講錄音轉成文字逐字稿（含時間標記），可同時產生字幕檔。",
+    ai: "speech",
+    notes: [
+      "需在系統設定選擇「語音轉文字」服務：OpenAI（Whisper／gpt-4o-transcribe）、Groq（速度快、價格低）、Gemini 或 OpenRouter。Claude 無法直接處理音檔。",
+      "單一音檔上限 25 MB（MP3 64 kbps 約可容納 50 分鐘）；更長的錄音請先分段。",
+      "時間標記與字幕檔需使用 Whisper 模型（OpenAI 或 Groq）。選擇繁體中文時，結果會自動轉為臺灣用語。",
+    ],
+    fields: [
+      { key: "file", label: "錄音檔", type: "file", required: true, accept: ".mp3,.m4a,.wav,.webm,.ogg,.flac,.mp4,.aac" },
+      { key: "language", label: "語言", type: "select", options: { "zh-TW": "繁體中文", en: "English", ja: "日本語", ko: "한국어", auto: "自動偵測" }, default: "zh-TW" },
+      { key: "prompt", label: "專有名詞（選填）", type: "text", placeholder: "例：系所名稱、人名、術語，可提高辨識正確率" },
+      { key: "subtitles", label: "同時產生字幕檔（.srt）", type: "checkbox", default: false },
+    ],
+    nodes: [
+      { id: "tr", type: "transcribe", fileId: "{{form.file}}", language: "{{form.language}}", prompt: "{{form.prompt}}", out: "transcript" },
+      { id: "doc", type: "save_file", source: "{{transcript}}", format: "docx", filename: "逐字稿-{{transcript.name}}", out: "file" },
+      { id: "srt", type: "save_file", when: "{{form.subtitles}}", source: "{{transcript}}", format: "srt", filename: "字幕-{{transcript.name}}", out: "srtFile" },
+    ],
+  },
+  {
+    id: "meeting-audio",
+    cat: "media",
+    name: "會議錄音整理",
+    desc: "上傳會議錄音，自動轉成逐字稿後整理為正式會議紀錄（含決議與待辦），輸出 Word 檔。",
+    ai: "speech",
+    notes: ["需設定「語音轉文字」服務；整理會議紀錄使用文字 AI。", "單一音檔上限 25 MB。"],
+    fields: [
+      { key: "file", label: "會議錄音", type: "file", required: true, accept: ".mp3,.m4a,.wav,.webm,.ogg,.flac,.mp4,.aac" },
+      { key: "title", label: "會議名稱", type: "text", required: true },
+      { key: "meta", label: "時間、地點、主席、出席者", type: "textarea", rows: 2 },
+      { key: "prompt", label: "專有名詞（選填）", type: "text" },
+    ],
+    nodes: [
+      { id: "tr", type: "transcribe", fileId: "{{form.file}}", language: "zh-TW", prompt: "{{form.prompt}}", out: "transcript" },
+      {
+        id: "minutes",
+        type: "llm",
+        system: FORMAL_SYSTEM,
+        prompt:
+          "以下是會議錄音的逐字稿。請整理成正式會議紀錄：\n# {{form.title}} 會議紀錄\n- 時間、地點、主席、出席人員、紀錄（{{form.meta}}；沒有的寫「○○」）\n## 一、報告事項\n## 二、討論事項（每案：案由、說明、決議）\n## 三、臨時動議\n## 四、待辦事項（表格：事項｜負責人｜期限）\n只能依據逐字稿內容，不確定處標註「（待確認）」。\n\n逐字稿：\n{{transcript}}",
+        out: "ai",
+      },
+      { id: "join", type: "set", value: "{{ai}}\n\n---\n\n## 附錄：逐字稿\n\n{{transcript}}", out: "text" },
+      { id: "save", type: "save_file", source: "{{text}}", format: "docx", formal: true, filename: "{{form.title}}-會議紀錄", out: "file" },
+    ],
+  },
+  {
+    id: "lecture-notes",
+    cat: "media",
+    name: "課堂與演講筆記",
+    desc: "將課堂、演講或線上會議錄音整理成重點筆記與可複習的問答。",
+    ai: "speech",
+    notes: ["需設定「語音轉文字」服務。"],
+    fields: [
+      { key: "file", label: "錄音檔", type: "file", required: true, accept: ".mp3,.m4a,.wav,.webm,.ogg,.flac,.mp4,.aac" },
+      { key: "topic", label: "主題（選填）", type: "text", placeholder: "例：數值方法第 5 週" },
+      { key: "language", label: "錄音語言", type: "select", options: { "zh-TW": "繁體中文", en: "English", ja: "日本語", auto: "自動偵測" }, default: "zh-TW" },
+    ],
+    nodes: [
+      { id: "tr", type: "transcribe", fileId: "{{form.file}}", language: "{{form.language}}", out: "transcript" },
+      { id: "notes", type: "llm", prompt: "以下是「{{form.topic}}」的錄音逐字稿。請用繁體中文整理：\n## 重點摘要\n## 詳細筆記（依主題分段，保留公式、數字與例子）\n## 名詞解釋\n## 複習問答（5 題，附答案）\n\n{{transcript}}", out: "ai" },
+      { id: "save", type: "save_file", source: "{{ai}}", format: "docx", filename: "筆記-{{transcript.name}}", out: "file" },
+    ],
+  },
+  {
+    id: "image-analysis",
+    cat: "media",
+    name: "圖片分析與說明",
+    desc: "上傳圖表、示意圖、照片或截圖，由 AI 解讀內容、回答問題或產生無障礙替代文字。",
+    ai: "normal",
+    notes: ["需使用支援圖片的模型：Claude、OpenAI、Gemini、OpenRouter（依模型）或 Ollama 的視覺模型。", "若要把圖片中的文字完整轉出，請改用「掃描文件文字辨識」。"],
+    fields: [
+      { key: "file", label: "圖片", type: "file", required: true, accept: ".png,.jpg,.jpeg,.webp,.gif" },
+      {
+        key: "task",
+        label: "要做什麼",
+        type: "select",
+        options: {
+          "請詳細說明這張圖片的內容與重點。": "說明圖片內容",
+          "這是一張圖表，請解讀其中的數據、趨勢與結論，並指出值得注意的地方。": "解讀圖表數據",
+          "請為這張圖片撰寫簡潔的無障礙替代文字（alt text），以及一段較詳細的描述。": "產生替代文字（無障礙）",
+          "請檢查這張圖片（簡報、海報或文件截圖）的排版、文字與設計問題，並提出改善建議。": "檢查設計與錯字",
+        },
+        default: "請詳細說明這張圖片的內容與重點。",
+      },
+      { key: "question", label: "補充問題（選填）", type: "textarea", rows: 2 },
+    ],
+    nodes: [{ id: "ask", type: "image_ask", fileId: "{{form.file}}", question: "{{form.task}}\n{{form.question}}", out: "ai" }],
+  },
+  {
+    id: "image-generate",
+    cat: "media",
+    name: "AI 圖片生成",
+    desc: "依文字描述產生海報、活動宣傳、簡報配圖、插畫等圖片（PNG）。",
+    ai: "imagegen",
+    notes: [
+      "需在系統設定選擇「圖片生成」服務：OpenAI（gpt-image）、Google Gemini（Imagen）或 OpenRouter。Claude 無法產生圖片。",
+      "AI 產生的圖片中的文字可能有錯字，正式文宣請再以設計軟體加入文字。",
+      "請勿產生侵害他人肖像權、著作權或不當的內容。",
+    ],
+    fields: [
+      { key: "desc", label: "圖片內容", type: "textarea", required: true, rows: 3, placeholder: "例：大學校園秋天的林蔭大道，學生騎腳踏車經過，溫暖午後陽光" },
+      { key: "style", label: "風格", type: "select", options: { "": "不指定", 寫實攝影風格: "寫實攝影", "扁平插畫風格，乾淨的色塊": "扁平插畫", 水彩手繪風格: "水彩手繪", "簡潔的商務簡報配圖風格，留白充足": "簡報配圖", "活動宣傳海報風格，構圖醒目": "宣傳海報", 可愛的卡通風格: "卡通" }, default: "" },
+      { key: "size", label: "尺寸", type: "select", options: { "1024x1024": "正方形", "1536x1024": "橫式（簡報、橫幅）", "1024x1536": "直式（海報）" }, default: "1024x1024" },
+      { key: "n", label: "張數（1–4）", type: "number", default: 1 },
+    ],
+    nodes: [{ id: "gen", type: "image_gen", prompt: "{{form.desc}}。{{form.style}}", size: "{{form.size}}", n: "{{form.n}}", filename: "AI圖片-{{today}}", out: "images" }],
+  },
+  {
+    id: "slides-script",
+    cat: "media",
+    name: "簡報轉講稿",
+    desc: "上傳 PowerPoint（.pptx／.ppt／.odp），為每張投影片產生口語講稿與時間分配，並整理可能被問的問題。",
+    ai: "normal",
+    notes: ["會一併參考投影片的講者備註。舊版 .ppt 需要電腦安裝 LibreOffice 才能讀取。"],
+    fields: [
+      { ...DOC_SOURCES, key: "doc", label: "簡報檔" },
+      { key: "minutes", label: "報告時間（分鐘）", type: "number", default: 10 },
+      { key: "audience", label: "聽眾", type: "text", placeholder: "例：系上老師與研究生" },
+    ],
+    nodes: [
+      {
+        id: "script",
+        type: "llm",
+        prompt: "以下是一份簡報的內容（含講者備註）。請用繁體中文、自然的口語，為每張投影片撰寫講稿，總長約 {{form.minutes}} 分鐘，聽眾為「{{form.audience}}」。格式：\n## 第 N 張：標題（建議時間）\n講稿內容\n最後列出「可能被問的 5 個問題與建議回答」。\n\n{{form.doc}}",
+        out: "ai",
+      },
+      { id: "save", type: "save_file", source: "{{ai}}", format: "docx", filename: "講稿-{{form.doc.name}}", out: "file" },
     ],
   },
 

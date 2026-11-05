@@ -148,17 +148,76 @@ export function fakeAnswer(system, userText, { hasPdf = false, hasImage = false 
 
 // ---------------- 假 OpenAI 相容 API ----------------
 // 依 model 名稱切換行為：mock、strict（只收 max_completion_tokens）、reasoning、ratelimit、badjson
+// 1×1 PNG（圖片生成回傳用）
+const PNG_1PX = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
 export async function startFakeOpenAI() {
   const calls = [];
+  const media = []; // 語音、生圖等非 chat 請求
   const server = http.createServer(async (req, res) => {
-    let b = "";
-    for await (const c of req) b += c;
-    const body = JSON.parse(b);
-    calls.push(body);
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const raw = Buffer.concat(chunks);
+    const path = new URL(req.url, "http://x").pathname;
     const err = (code, message, extra = {}) => {
       res.writeHead(code, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message, type: "invalid_request_error", ...extra } }));
     };
+    const json = (obj) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(obj));
+    };
+    if (!req.headers.authorization && !/ollama/.test(raw.toString())) {
+      if (req.method === "GET" || path.endsWith("/transcriptions")) return err(401, "Incorrect API key provided");
+    }
+    // 模型清單（含 OpenRouter 格式的價格與輸入類型）
+    if (req.method === "GET" && path.endsWith("/models")) {
+      media.push({ path, headers: req.headers });
+      return json({
+        data: [
+          { id: "gpt-test-chat", object: "model" },
+          { id: "text-embedding-3-small", object: "model" },
+          { id: "whisper-1", object: "model" },
+          { id: "gpt-image-1", object: "model" },
+          { id: "models/gemini-test-flash", object: "model" },
+          { id: "vendor/vision-model", name: "Vendor: Vision Model", context_length: 200000, pricing: { prompt: "0.000003", completion: "0.000015" }, architecture: { input_modalities: ["text", "image", "file"], output_modalities: ["text"] } },
+          { id: "vendor/audio-model", name: "Vendor: Audio Model", context_length: 100000, pricing: { prompt: "0.000001", completion: "0.000002" }, architecture: { input_modalities: ["text", "audio"], output_modalities: ["text"] } },
+          { id: "vendor/image-gen", name: "Vendor: Image Gen", context_length: 8000, pricing: { prompt: "0", completion: "0.00004" }, architecture: { input_modalities: ["text"], output_modalities: ["image", "text"] } },
+        ],
+      });
+    }
+    // 語音轉文字（multipart）：故意回傳簡體字，以驗證程式會轉成臺灣用語
+    if (path.endsWith("/audio/transcriptions")) {
+      const form = raw.toString("latin1");
+      const field = (n) => new RegExp(`name="${n}"\\r\\n\\r\\n([^\\r]*)`).exec(form)?.[1];
+      const model = field("model");
+      const fmt = field("response_format");
+      media.push({ path, model, language: field("language"), format: fmt, prompt: Buffer.from(field("prompt") || "", "latin1").toString("utf8"), size: raw.length });
+      if (raw.length > 26 * 1024 * 1024) return err(413, "Maximum content size limit exceeded");
+      const text = "大家好，今天的会议讨论软件采购和网络设置。决议：下周三前完成报价。";
+      if (fmt === "verbose_json") return json({ text, segments: [{ start: 0, end: 3.2, text: "大家好，今天的会议讨论软件采购和网络设置。" }, { start: 3.2, end: 6.5, text: "决议：下周三前完成报价。" }] });
+      return json({ text });
+    }
+    // 圖片生成
+    if (path.endsWith("/images/generations")) {
+      const body = JSON.parse(raw.toString() || "{}");
+      media.push({ path, ...body });
+      if (/blocked/.test(body.prompt)) return json({ data: [] });
+      return json({ data: Array.from({ length: body.n || 1 }, () => ({ b64_json: PNG_1PX })) });
+    }
+    const body = JSON.parse(raw.toString() || "{}");
+    calls.push(body);
+    // 音訊輸入（Gemini / OpenRouter）
+    if (body.messages?.some((m) => Array.isArray(m.content) && m.content.some((c) => c.type === "input_audio"))) {
+      media.push({ path, model: body.model, audio: true });
+      return json({ choices: [{ message: { role: "assistant", content: "大家好，这是音频转写的结果。" } }] });
+    }
+    // OpenRouter 圖片模型（chat + modalities）
+    if (body.modalities?.includes("image")) {
+      media.push({ path, model: body.model, modalities: body.modalities });
+      if (/blocked/.test(JSON.stringify(body.messages))) return json({ choices: [{ message: { role: "assistant", content: "I can't generate that.", images: [] } }] });
+      return json({ choices: [{ message: { role: "assistant", content: "", images: [{ type: "image_url", image_url: { url: "data:image/png;base64," + PNG_1PX } }] } }] });
+    }
     if (!req.headers.authorization && !/ollama/.test(body.model)) return err(401, "Incorrect API key provided");
     if (body.model === "ratelimit") return err(429, "Rate limit reached");
     if (body.model === "strict" && "max_tokens" in body)
@@ -168,7 +227,8 @@ export async function startFakeOpenAI() {
     const flat = (c) => (typeof c === "string" ? c : (c || []).map((x) => x.text || "").join("\n"));
     const user = body.messages.filter((m) => m.role !== "system").map((m) => flat(m.content)).join("\n");
     const hasImage = body.messages.some((m) => Array.isArray(m.content) && m.content.some((x) => x.type === "image_url"));
-    let { text, refuse } = fakeAnswer(sys, user, { hasImage });
+    const hasPdf = body.messages.some((m) => Array.isArray(m.content) && m.content.some((x) => x.type === "file" && /application\/pdf/.test(x.file?.file_data || "")));
+    let { text, refuse } = fakeAnswer(sys, user, { hasImage, hasPdf });
     if (refuse) text = "I can't help with that.";
     if (body.model === "badjson" && (user.includes('"columns"') || user.includes('{"results":'))) text = "抱歉，這是說明文字而不是 JSON";
     res.writeHead(200, { "content-type": "text/event-stream" });
@@ -179,7 +239,7 @@ export async function startFakeOpenAI() {
     res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
     res.end("data: [DONE]\n\n");
   });
-  return { server, calls, base: (await listen(server)) + "/v1" };
+  return { server, calls, media, base: (await listen(server)) + "/v1" };
 }
 
 // ---------------- 假 Claude API（Messages + SSE） ----------------
@@ -189,6 +249,10 @@ export async function startFakeClaude() {
     let b = "";
     for await (const c of req) b += c;
     const body = JSON.parse(b || "{}");
+    if (req.method === "GET" && req.url.startsWith("/v1/models")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ data: [{ type: "model", id: "claude-opus-5-5", display_name: "Claude Opus 5.5", created_at: "2026-09-01T00:00:00Z", max_input_tokens: 1000000 }, { type: "model", id: "claude-haiku-5-5", display_name: "Claude Haiku 5.5", created_at: "2026-09-01T00:00:00Z", max_input_tokens: 1000000 }], has_more: false, first_id: "claude-opus-5-5", last_id: "claude-haiku-5-5" }));
+    }
     calls.push({ path: req.url, headers: req.headers, body });
     const key = req.headers["x-api-key"] || (req.headers.authorization || "").replace(/^Bearer /, "");
     if (key !== "sk-ant-test") {

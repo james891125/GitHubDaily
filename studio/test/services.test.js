@@ -195,7 +195,7 @@ describe("文件與資料", () => {
     assert.equal(S.world.openai.calls.at(-1).messages.at(-1).content[1].type, "image_url");
     const pdf = await S.upload("掃描檔.pdf");
     r = await run("ocr", { file: pdf.id });
-    assert.match(r.error.message, /需要使用 Claude/);
+    assert.match(r.error.message, /無法直接讀取 PDF。掃描型 PDF 請改用 Claude、OpenAI 或 OpenRouter/);
     await useClaude();
   });
   test("文件翻譯：術語表會送給 AI", async () => {
@@ -233,6 +233,130 @@ describe("文件與資料", () => {
     ok(r);
     assert.equal(r.aiCalls, 0);
     assert.match((await S.download(r.files[0])).toString("utf8"), /\| 鍵盤 \| 12 \|/);
+  });
+});
+
+describe("影音與圖片", () => {
+  const speechVia = (provider, model = "") => S.api("/api/settings", { speechProvider: provider, speechModel: model, groqKey: "gsk-test", openaiKey: "sk-test", geminiKey: "gm-test", openrouterKey: "or-test" });
+  before(async () => {
+    await useClaude();
+    await speechVia("groq", "whisper-large-v3-turbo");
+  });
+  test("錄音轉逐字稿：Groq Whisper，簡體結果自動轉為臺灣用語，產生 Word 與字幕檔", async () => {
+    const f = await S.upload("錄音.mp3");
+    assert.equal(f.needsTranscribe, true);
+    const r = await run("transcribe", { file: f.id, language: "zh-TW", prompt: "系務會議", subtitles: true });
+    ok(r);
+    const req = S.world.openai.media.filter((m) => m.path?.endsWith("/audio/transcriptions")).at(-1);
+    assert.equal(req.model, "whisper-large-v3-turbo");
+    assert.equal(req.format, "verbose_json");
+    assert.equal(req.language, "zh");
+    assert.match(req.prompt, /繁體中文.*系務會議/);
+    const t = await docText(r.files.find((x) => x.name.endsWith(".docx")));
+    assert.match(t, /軟體採購和網路設定/);
+    assert.match(t, /下週三/);
+    assert.ok(!/软件|网络/.test(t), "應已轉為繁體");
+    const srt = (await S.download(r.files.find((x) => x.name.endsWith(".srt")))).toString("utf8");
+    assert.match(srt, /^1\n00:00:00,000 --> 00:00:03,200\n大家好/);
+    assert.match(srt, /\n2\n00:00:03,200 --> 00:00:06,500\n決議/);
+  });
+  test("錄音轉逐字稿：OpenAI gpt-4o-transcribe（無時間軸）要求字幕時清楚說明", async () => {
+    await speechVia("openai", "gpt-4o-transcribe");
+    const f = await S.upload("錄音.wav");
+    let r = await run("transcribe", { file: f.id, subtitles: false });
+    ok(r);
+    assert.equal(S.world.openai.media.filter((m) => m.path?.endsWith("/audio/transcriptions")).at(-1).format, "json");
+    r = await run("transcribe", { file: f.id, subtitles: true });
+    assert.match(r.error.message, /字幕檔需要含時間軸/);
+    await speechVia("groq", "whisper-large-v3-turbo");
+  });
+  test("錄音轉逐字稿：Gemini 以 input_audio 直接聽 MP3；M4A 等格式提示轉檔", async () => {
+    await speechVia("gemini", "gemini-test-flash");
+    const mp3 = await S.upload("錄音.mp3");
+    let r = await run("transcribe", { file: mp3.id });
+    ok(r);
+    assert.ok(S.world.openai.media.at(-1).audio);
+    assert.match(await docText(r.files[0]), /這是音訊轉寫的結果/);
+    const m4a = await S.api("/api/files", { name: "錄音.m4a", data: Buffer.from("fake m4a").toString("base64") });
+    r = await run("transcribe", { file: m4a.id });
+    assert.match(r.error.message, /只接受 MP3 或 WAV/);
+    await speechVia("groq", "whisper-large-v3-turbo");
+  });
+  test("錄音轉逐字稿：超過 25 MB 時提示壓縮或分段", async () => {
+    const big = await S.api("/api/files", { name: "長錄音.mp3", data: Buffer.alloc(26 * 1024 * 1024, 1).toString("base64") });
+    const r = await run("transcribe", { file: big.id });
+    assert.match(r.error.message, /超過 25 MB/);
+  });
+  test("錄音轉逐字稿：未設定語音服務時說明 Claude 無法處理音檔", async () => {
+    await speechVia("");
+    const f = await S.upload("錄音.mp3");
+    const r = await run("transcribe", { file: f.id });
+    assert.match(r.error.message, /語音轉文字.*Claude 無法直接處理音檔/);
+    await speechVia("groq", "whisper-large-v3-turbo");
+  });
+  test("會議錄音整理：轉錄 → 會議紀錄（含逐字稿附錄）", async () => {
+    const f = await S.upload("錄音.mp3");
+    const r = await run("meeting-audio", { file: f.id, title: "系務會議" });
+    ok(r);
+    assert.match(S.world.claude.calls.at(-1).body.messages[0].content, /軟體採購/);
+    const t = await docText(r.files[0]);
+    assert.match(t, /附錄：逐字稿/);
+  });
+  test("課堂與演講筆記", async () => {
+    const f = await S.upload("錄音.wav");
+    const r = await run("lecture-notes", { file: f.id, topic: "數值方法" });
+    ok(r);
+    assert.match(S.world.claude.calls.at(-1).body.messages[0].content, /數值方法/);
+  });
+  test("音檔不能直接當文件使用，會提示改用轉錄服務", async () => {
+    const f = await S.upload("錄音.mp3");
+    const r = await run("summarize", { doc: { kind: "file", fileId: f.id } });
+    assert.match(r.error.message, /錄音轉逐字稿/);
+  });
+  test("圖片分析：Claude 收到圖片；不支援圖片的供應商清楚說明", async () => {
+    const img = await S.upload("截圖.png");
+    let r = await run("image-analysis", { file: img.id, task: "這是一張圖表，請解讀其中的數據、趨勢與結論，並指出值得注意的地方。" });
+    ok(r);
+    const blocks = S.world.claude.calls.at(-1).body.messages[0].content;
+    assert.equal(blocks[0].type, "image");
+    assert.match(blocks[1].text, /解讀其中的數據/);
+    await S.api("/api/settings", { provider: "deepseek", deepseekKey: "ds-test", deepseekModel: "deepseek-chat" });
+    r = await run("image-analysis", { file: img.id });
+    assert.match(r.error.message, /DeepSeek 的模型不支援圖片/);
+    await useClaude();
+  });
+  test("AI 圖片生成：OpenAI（gpt-image）、Gemini（Imagen）、OpenRouter（chat 模式）都能產生 PNG", async () => {
+    for (const [provider, model, check] of [
+      ["openai", "gpt-image-1", (m) => m.path.endsWith("/images/generations") && m.response_format === undefined],
+      ["gemini", "imagen-3.0-generate-002", (m) => m.path.endsWith("/images/generations") && m.response_format === "b64_json"],
+      ["openrouter", "vendor/image-gen", (m) => m.path.endsWith("/chat/completions") && m.modalities?.includes("image")],
+    ]) {
+      await S.api("/api/settings", { imageProvider: provider, imageModel: model, openaiKey: "sk-test", geminiKey: "gm-test", openrouterKey: "or-test" });
+      const r = await run("image-generate", { desc: "校園秋天的林蔭大道", style: "水彩手繪風格", size: "1536x1024", n: 2 });
+      ok(r);
+      assert.equal(r.files.length, 2, provider);
+      const png = await S.download(r.files[0]);
+      assert.equal(png.subarray(1, 4).toString(), "PNG", provider);
+      const req = S.world.openai.media.at(-1);
+      assert.ok(check(req), `${provider} 請求格式不正確：${JSON.stringify(req).slice(0, 200)}`);
+      if (provider !== "openrouter") assert.equal(req.size, "1536x1024");
+    }
+  });
+  test("AI 圖片生成：被安全規則擋下（沒有回傳圖片）時說明原因；未設定時提示", async () => {
+    let r = await run("image-generate", { desc: "blocked content" });
+    assert.match(r.error.message, /沒有回傳圖片/);
+    await S.api("/api/settings", { imageProvider: "" });
+    r = await run("image-generate", { desc: "風景" });
+    assert.match(r.error.message, /尚未設定「圖片生成」.*Claude 無法產生圖片/);
+  });
+  test("簡報轉講稿：上傳 PowerPoint，講稿依據投影片內容與講者備註", async () => {
+    const f = await S.upload("簡報.pptx");
+    const r = await run("slides-script", { doc: { kind: "file", fileId: f.id }, minutes: 8, audience: "系上老師" });
+    ok(r);
+    const sent = S.world.claude.calls.at(-1).body.messages[0].content;
+    assert.match(sent, /第 2 張投影片/);
+    assert.match(sent, /\| 感測器 \| 12000 \|/);
+    assert.match(sent, /強調節能成效/);
   });
 });
 

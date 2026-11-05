@@ -11,6 +11,8 @@ import { writeOutput } from "./lib/store.js";
 import { scrapePage, crawlSite, checkSite, reportToMarkdown } from "./lib/web.js";
 import * as kb from "./lib/kb.js";
 import * as flow from "./lib/flow.js";
+import { PROVIDERS, providerReady } from "./lib/providers.js";
+import { listModels, speechConfig, imageConfig } from "./lib/media.js";
 import { CATEGORIES, SERVICES, getService, validateForm } from "./lib/services.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -24,12 +26,12 @@ function json(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-async function body(req, limit = 40 * 1024 * 1024) {
+async function body(req, limit = 70 * 1024 * 1024) {
   const chunks = [];
   let n = 0;
   for await (const c of req) {
     n += c.length;
-    if (n > limit) throw Object.assign(new Error("檔案太大（上限 30 MB）"), { status: 413 });
+    if (n > limit) throw Object.assign(new Error("檔案太大（上限 50 MB）"), { status: 413 });
     chunks.push(c);
   }
   const s = Buffer.concat(chunks).toString("utf8");
@@ -81,8 +83,28 @@ async function resolveText(b) {
 
 const routes = {
   // ---- 基本 ----
-  "GET /api/meta": (req, res) =>
-    json(res, 200, { models: CLAUDE_MODELS, nodeTypes: flow.NODE_TYPES, templates: flow.TEMPLATES, languages: LANGUAGES, supported: SUPPORTED, ready: llmReady() }),
+  "GET /api/meta": (req, res) => {
+    const s = getSettings();
+    const ok = (fn) => {
+      try {
+        fn(s);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const providers = Object.fromEntries(
+      Object.entries(PROVIDERS).map(([id, p]) => [id, { name: p.name, note: p.note, keyUrl: p.keyUrl, can: p.can, keyField: p.keyField || null, modelField: p.modelField, baseField: p.baseField || null, noKey: !!p.noKey, speechModels: p.speechModels || [], imageModels: p.imageModels || [], ready: providerReady(id, s) }]),
+    );
+    json(res, 200, { models: CLAUDE_MODELS, providers, nodeTypes: flow.NODE_TYPES, templates: flow.TEMPLATES, languages: LANGUAGES, supported: SUPPORTED, ready: llmReady(), speechReady: ok(speechConfig), imageReady: ok(imageConfig) });
+  },
+  "GET /api/models": async (req, res, url) => {
+    try {
+      json(res, 200, { models: await listModels(url.searchParams.get("provider"), { purpose: url.searchParams.get("purpose") || "chat" }) });
+    } catch (e) {
+      json(res, e.status && e.status < 500 ? 400 : 502, { error: e.message });
+    }
+  },
   "GET /api/settings": (req, res) => json(res, 200, publicSettings()),
   "POST /api/settings": async (req, res) => {
     saveSettings(await body(req));
@@ -304,7 +326,8 @@ const server = http.createServer(async (req, res) => {
       const name = path.basename(p).replace(/^\d+_/, "");
       // filename 給舊瀏覽器的 ASCII 備援；filename* 為完整中文檔名
       const ascii = name.replace(/[^\x20-\x7e]/g, "_").replace(/"/g, "");
-      res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}` });
+      const img = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" }[path.extname(name).toLowerCase()];
+      res.writeHead(200, { "content-type": img || "application/octet-stream", "x-content-type-options": "nosniff", "content-disposition": `${img ? "inline" : "attachment"}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}` });
       return fs.createReadStream(p).pipe(res);
     }
     const handler = routes[`${req.method} ${url.pathname}`];

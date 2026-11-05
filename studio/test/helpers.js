@@ -25,6 +25,12 @@ export async function startStack() {
       SCHOLAR_CROSSREF_BASE: world.scholar.url + "/cr",
       SCHOLAR_OPENALEX_BASE: world.scholar.url + "/oa",
       ARXIV_BASE: world.scholar.url + "/arxiv",
+      // 所有 OpenAI 相容供應商都指向模擬服務
+      PROVIDER_BASE_OPENAI: world.openai.base,
+      PROVIDER_BASE_OPENROUTER: world.openai.base,
+      PROVIDER_BASE_GEMINI: world.openai.base,
+      PROVIDER_BASE_DEEPSEEK: world.openai.base,
+      PROVIDER_BASE_GROQ: world.openai.base,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

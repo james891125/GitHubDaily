@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import Anthropic from "@anthropic-ai/sdk";
 import { getSettings, load, save, DATA_DIR } from "./store.js";
+import { PROVIDERS, chatConfig, providerReady, providerBase, providerHeaders } from "./providers.js";
 
 export const CLAUDE_MODELS = [
   { id: "claude-opus-5-5", label: "Claude Opus 5.5（最佳品質，預設）" },
@@ -21,14 +22,10 @@ export class LLMError extends Error {
   }
 }
 
-function isLocal(url) {
-  return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])/.test(url || "");
-}
-
 export function llmReady(s = getSettings()) {
-  if (s.provider === "openai") return !!s.openaiKey || isLocal(s.openaiBase);
-  return !!s.anthropicKey;
+  return providerReady(chatConfig(s).id, s);
 }
+export const isClaude = (s = getSettings()) => chatConfig(s).kind === "anthropic";
 
 // ================= 用量控管 =================
 // 1. 回應快取：同樣的請求（模型、提示、設定都相同）在有效期內直接使用上次結果，不再呼叫 API
@@ -40,14 +37,14 @@ const usageScope = new AsyncLocalStorage();
 
 /** 在 fn 執行期間統計所有 AI 呼叫，回傳 { result, usage } */
 export async function withUsage(fn) {
-  const tally = { calls: 0, cached: 0, inputTokens: 0, outputTokens: 0, estimated: false };
+  const tally = { calls: 0, cached: 0, inputTokens: 0, outputTokens: 0, speech: 0, images: 0, estimated: false };
   const parent = usageScope.getStore();
   try {
     const result = await usageScope.run(tally, fn);
     return { result, usage: tally };
   } finally {
     // 巢狀統計：內層的用量也要算進外層
-    if (parent) for (const k of ["calls", "cached", "inputTokens", "outputTokens"]) parent[k] += tally[k];
+    if (parent) for (const k of ["calls", "cached", "inputTokens", "outputTokens", "speech", "images"]) parent[k] += tally[k];
     if (parent && tally.estimated) parent.estimated = true;
   }
 }
@@ -55,7 +52,21 @@ export function currentUsage() {
   return usageScope.getStore() || null;
 }
 
-function recordUsage({ cached, input = 0, output = 0, estimated = false }) {
+/**
+ * 記錄用量。kind：chat（預設，依 token 計）、speech（語音轉文字，依錄音長度計費）、image（圖片生成，依張數計費）
+ */
+export function recordUsage({ cached, input = 0, output = 0, estimated = false, kind = "chat", count = 1 }) {
+  if (kind !== "chat") {
+    const field = kind === "speech" ? "speech" : "images";
+    const t2 = usageScope.getStore();
+    if (t2) t2[field] += count;
+    const day2 = new Date().toLocaleDateString("sv-SE");
+    const all2 = load("usage", {});
+    const d2 = (all2[day2] ||= { calls: 0, cached: 0, inputTokens: 0, outputTokens: 0 });
+    d2[field] = (d2[field] || 0) + count;
+    save("usage", all2);
+    return;
+  }
   const t = usageScope.getStore();
   if (t) {
     if (cached) t.cached++;
@@ -84,7 +95,10 @@ export function usageSummary() {
   const sum = (filter) =>
     Object.entries(all)
       .filter(([k]) => filter(k))
-      .reduce((a, [, v]) => ({ calls: a.calls + v.calls, cached: a.cached + v.cached, inputTokens: a.inputTokens + v.inputTokens, outputTokens: a.outputTokens + v.outputTokens }), { calls: 0, cached: 0, inputTokens: 0, outputTokens: 0 });
+      .reduce(
+        (a, [, v]) => ({ calls: a.calls + v.calls, cached: a.cached + v.cached, inputTokens: a.inputTokens + v.inputTokens, outputTokens: a.outputTokens + v.outputTokens, speech: a.speech + (v.speech || 0), images: a.images + (v.images || 0) }),
+        { calls: 0, cached: 0, inputTokens: 0, outputTokens: 0, speech: 0, images: 0 },
+      );
   return { today: sum((k) => k === today), month: sum((k) => k.startsWith(month)), days: all };
 }
 
@@ -95,7 +109,8 @@ const estimateTokens = (text) => {
 };
 
 function cacheKey(s, req) {
-  const provider = s.provider === "openai" ? `openai|${s.openaiBase}|${req.model || s.openaiModel}` : `anthropic|${req.model || s.claudeModel}|${effortFor(s, req)}`;
+  const c = chatConfig(s);
+  const provider = `${c.id}|${c.base}|${req.model || c.model}|${c.kind === "anthropic" ? effortFor(s, req) : ""}`;
   return crypto.createHash("sha256").update(JSON.stringify([provider, req.system || "", req.messages, req.maxTokens || 0, req.schema || null])).digest("hex");
 }
 
@@ -143,10 +158,12 @@ function effortFor(s, req) {
  */
 export async function generate(req, onText = () => {}, signal) {
   const s = getSettings();
-  if (!llmReady(s)) throw new LLMError("尚未設定 API Key，請先到「系統設定」頁輸入你的金鑰。", 401);
+  const cfg = chatConfig(s);
+  if (!llmReady(s)) throw new LLMError(`尚未設定 ${cfg.name} 的 API Key，請先到「系統設定」輸入金鑰。`, 401);
+  if (!cfg.model && !req.model) throw new LLMError(`尚未選擇 ${cfg.name} 的模型，請到「系統設定」按「取得模型清單」選擇。`, 400);
   let messages = req.messages || [{ role: "user", content: req.prompt }];
-  if (req.attachments?.length) messages = withAttachments(messages, req.attachments, s.provider);
-  if (req.webSearch && s.provider === "openai") throw new LLMError("「網路搜尋」功能需要使用 Claude（請到設定切換供應商）。", 400);
+  if (req.attachments?.length) messages = withAttachments(messages, req.attachments, cfg);
+  if (req.webSearch && cfg.kind !== "anthropic") throw new LLMError("「網路搜尋」功能需要使用 Claude（請到系統設定切換供應商）。", 400);
   const full = { ...req, messages };
   const days = req.noCache ? 0 : Number(s.cacheDays ?? 7);
   const key = cacheKey(s, full);
@@ -156,7 +173,7 @@ export async function generate(req, onText = () => {}, signal) {
     recordUsage({ cached: true });
     return { ...hit, cached: true };
   }
-  const r = s.provider === "openai" ? await openaiChat(s, full, onText, signal) : await claudeChat(s, full, onText, signal);
+  const r = cfg.kind === "anthropic" ? await claudeChat(s, full, onText, signal) : await openaiChat(s, cfg, full, onText, signal);
   recordUsage({ input: r.inputTokens, output: r.outputTokens, estimated: r.estimated });
   // 只有開啟快取時才寫入；被截斷的回應不快取
   if (days && !r.truncated) writeCache(key, { text: r.text, model: r.model, ...(r.sources ? { sources: r.sources } : {}) });
@@ -167,13 +184,22 @@ export async function generate(req, onText = () => {}, signal) {
  * 把附件（PDF、圖片）放進最後一則使用者訊息。
  * attachments: [{ kind: "pdf" | "image", mediaType, data(base64), name }]
  */
-function withAttachments(messages, attachments, provider) {
+function withAttachments(messages, attachments, cfg) {
   const last = messages.at(-1);
   const text = typeof last.content === "string" ? last.content : "";
   let content;
-  if (provider === "openai") {
-    if (attachments.some((a) => a.kind === "pdf")) throw new LLMError("直接讀取 PDF（掃描檔文字辨識）需要使用 Claude；OpenAI 相容服務請改上傳圖片。", 400);
-    content = [{ type: "text", text }, ...attachments.map((a) => ({ type: "image_url", image_url: { url: `data:${a.mediaType};base64,${a.data}` } }))];
+  if (cfg.kind !== "anthropic") {
+    if (attachments.some((a) => a.kind === "pdf") && !cfg.can.pdf)
+      throw new LLMError(`${cfg.name} 無法直接讀取 PDF。掃描型 PDF 請改用 Claude、OpenAI 或 OpenRouter；或將頁面截圖成圖片後再辨識。`, 400);
+    if (attachments.some((a) => a.kind === "image") && !cfg.can.image) throw new LLMError(`${cfg.name} 的模型不支援圖片，請改用 Claude、OpenAI、Gemini 或 OpenRouter。`, 400);
+    content = [
+      { type: "text", text },
+      ...attachments.map((a) =>
+        a.kind === "pdf"
+          ? { type: "file", file: { filename: a.name || "document.pdf", file_data: `data:application/pdf;base64,${a.data}` } }
+          : { type: "image_url", image_url: { url: `data:${a.mediaType};base64,${a.data}` } },
+      ),
+    ];
   } else {
     content = [
       ...attachments.map((a) =>
@@ -188,7 +214,7 @@ function withAttachments(messages, attachments, provider) {
 }
 
 async function claudeChat(s, { system, messages, maxTokens = 32000, model, schema, webSearch, ...req }, onText, signal) {
-  const client = new Anthropic({ apiKey: s.anthropicKey });
+  const client = new Anthropic({ apiKey: s.anthropicKey, ...(process.env.PROVIDER_BASE_ANTHROPIC ? { baseURL: process.env.PROVIDER_BASE_ANTHROPIC } : {}) });
   const m = model || s.claudeModel || "claude-opus-5-5";
   const effort = effortFor(s, req);
   const output_config = {
@@ -264,7 +290,7 @@ const tokenParamCache = new Map();
  * - max_tokens：DeepSeek、Ollama、OpenRouter 等多數相容服務使用這個
  * 先依端點猜一個，若被回「不支援此參數」就自動換另一個重試。
  */
-export async function postChatCompletion({ base, key, model, messages, maxTokens, signal }) {
+export async function postChatCompletion({ base, key, model, messages, maxTokens, signal, headers = {} }) {
   const official = /api\.openai\.com/.test(base);
   const cacheKey = `${base}|${model}`;
   const first = tokenParamCache.get(cacheKey) || (/api\.openai\.com/.test(base) ? "max_completion_tokens" : "max_tokens");
@@ -272,7 +298,7 @@ export async function postChatCompletion({ base, key, model, messages, maxTokens
     fetch(`${base}/chat/completions`, {
       method: "POST",
       signal,
-      headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
+      headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}), ...headers },
       body: JSON.stringify({ model, messages, stream: true, [param]: maxTokens, ...(official ? { stream_options: { include_usage: true } } : {}) }),
     });
   let param = first;
@@ -301,11 +327,10 @@ export async function postChatCompletion({ base, key, model, messages, maxTokens
   return res;
 }
 
-async function openaiChat(s, { system, messages, maxTokens = 16000, model, schema }, onText, signal) {
-  const base = (s.openaiBase || "https://api.openai.com/v1").replace(/\/+$/, "");
+async function openaiChat(s, cfg, { system, messages, maxTokens = 16000, model, schema }, onText, signal) {
   const msgs = system ? [{ role: "system", content: system }, ...messages] : messages;
   // 推理模型的思考也算在長度上限內，所以預設給大一點
-  const res = await postChatCompletion({ base, key: s.openaiKey, model: model || s.openaiModel, messages: msgs, maxTokens, signal });
+  const res = await postChatCompletion({ base: cfg.base, key: cfg.key, model: model || cfg.model, messages: msgs, maxTokens, signal, headers: PROVIDERS[cfg.id]?.headers });
   let text = "";
   let buf = "";
   let usage = null;
@@ -342,7 +367,7 @@ async function openaiChat(s, { system, messages, maxTokens = 16000, model, schem
   void schema;
   return {
     text,
-    model: model || s.openaiModel,
+    model: model || cfg.model,
     truncated,
     inputTokens: usage?.prompt_tokens ?? estimateTokens(msgs.map((m) => (typeof m.content === "string" ? m.content : (m.content || []).map((c) => c.text || "").join(" "))).join("\n")) + msgs.reduce((n, m) => n + (Array.isArray(m.content) ? m.content.filter((c) => c.type === "image_url").length * 1000 : 0), 0),
     outputTokens: usage?.completion_tokens ?? estimateTokens(text),
@@ -373,7 +398,7 @@ export function extractJson(text) {
 export async function generateJson(prompt, { system, maxTokens = 16000, signal, schema, light = true } = {}) {
   const s = getSettings();
   const sys = (system ? system + "\n" : "") + "只輸出合法的 JSON，不要加任何說明文字。";
-  const useSchema = schema && s.provider !== "openai";
+  const useSchema = schema && chatConfig(s).kind === "anthropic";
   let { text } = await generate({ system: sys, prompt, maxTokens, light, ...(useSchema ? { schema } : {}) }, undefined, signal);
   let data = extractJson(text);
   if (data === null && !useSchema) {

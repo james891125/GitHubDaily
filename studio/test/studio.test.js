@@ -35,10 +35,11 @@ after(() => {
   llm.server.close();
 });
 
-test("設定：金鑰遮罩、遮罩值不會覆蓋原金鑰", () => {
-  assert.match(store.publicSettings().openaiKey, /•/);
-  store.saveSettings({ openaiKey: store.publicSettings().openaiKey });
-  assert.equal(store.getSettings().openaiKey, "test-key");
+test("設定：金鑰遮罩、遮罩值不會覆蓋原金鑰（非 OpenAI 官方網址存為「其他 OpenAI 相容服務」）", () => {
+  assert.equal(store.getSettings().provider, "custom");
+  assert.match(store.publicSettings().customKey, /•/);
+  store.saveSettings({ customKey: store.publicSettings().customKey });
+  assert.equal(store.getSettings().customKey, "test-key");
 });
 
 test("文件：PDF 擷取文字", async () => {

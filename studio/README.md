@@ -1,15 +1,16 @@
 # AI 辦公服務平台
 
-在自己電腦上執行、使用自己 API Key 的辦公服務平台。它把開源社群中常見工具的功能，整理成 **23 項現成的服務**：像校務、行政系統的「線上申辦」一樣，選擇服務、填寫表單、按送出，就能取得結果（Word、Excel 或文字），不需要自己設計流程。
+在自己電腦上執行、使用自己 API Key 的辦公服務平台。它把開源社群中常見工具的功能，整理成 **29 項現成的服務**：像校務、行政系統的「線上申辦」一樣，選擇服務、填寫表單、按送出，就能取得結果（Word、Excel 或文字），不需要自己設計流程。
 
 | 類別 | 服務項目 | 參考的開源專案做法 |
 |---|---|---|
 | **文書行政** | 公文撰寫（簽、函、公告、書函、開會通知單，標楷體 Word）、會議紀錄整理、信件回覆草稿、錯字與語句校對、文件摘要、文件版本比對、繁簡轉換 | OpenCC、diff |
 | **學術研究** | 文獻搜尋與整理（OpenAlex／arXiv → Excel）、文獻回顧草稿（只引用真實搜尋結果）、論文翻譯與摘要、參考文獻格式產生（APA、IEEE、Chicago、MLA、Harvard、BibTeX）、研究主題追蹤（可定期） | arxiv-mcp-server、zotero-pdf2zh、SurveyX |
 | **文件與資料** | 掃描文件文字辨識、文件翻譯（含術語表）、資料擷取成 Excel、資料表分析報告、文件轉純文字 | MinerU、Ollama-OCR、zerox、PDFMathTranslate |
+| **影音與圖片** | 錄音轉逐字稿（含時間標記與 .srt 字幕）、會議錄音整理、課堂與演講筆記、圖片分析與說明、AI 圖片生成、簡報轉講稿 | Whisper、SoftWhisper、hyprnote |
 | **網站與資訊** | 網站健康檢查、網頁變動監控、新聞與公告摘要（RSS）、外文網頁翻譯摘要、網路研究報告、網站匯入知識庫 | Web-Check、changedetection、crawl4ai、Perplexica |
 | **知識庫問答** | 上傳規章、手冊、FAQ，AI 只根據這些資料回答並標註出處 | MaxKB、AnythingLLM |
-| **自訂工作流程**（進階） | 以 24 種步驟自行組合流程，可定期執行、匯入匯出 | n8n、Dify、huginn |
+| **自訂工作流程**（進階） | 以 27 種步驟自行組合流程，可定期執行、匯入匯出 | n8n、Dify、huginn |
 
 所有功能皆重新撰寫，不需另外安裝上述專案。標示「不使用 AI」的服務（文獻搜尋、引用格式、繁簡轉換、文件比對、網站檢查等）完全不花 API 費用。
 
@@ -38,12 +39,35 @@ npm start
 
 ## 支援的 AI
 
-| 供應商 | 設定 |
-|---|---|
-| **Anthropic Claude**（建議） | 填入 `sk-ant-…`，可選 Opus 5.5（預設）／Sonnet 5.5／Haiku 5.5 與思考深度 |
-| **OpenAI 相容** | 填入 Base URL 與模型名稱：OpenAI、DeepSeek、Google Gemini、OpenRouter，或本機 Ollama（免金鑰） |
+在「系統設定」中，每家供應商的金鑰與模型分開保存，切換時不會遺失。模型可以按「取得模型清單」**直接從 API 讀取**（OpenRouter 另會顯示每個模型可輸入的類型與價格），也可以手動輸入。
 
-金鑰存在本機 `studio/data/settings.json`（檔案權限 600），只會送往你選擇的 AI 供應商。之所以存在伺服器端而不是瀏覽器，是因為排程工作流在背景執行時需要用到金鑰。
+| 供應商 | 文字 | 讀 PDF | 看圖 | 語音轉文字 | 生成圖片 | 申請金鑰 |
+|---|---|---|---|---|---|---|
+| **Anthropic Claude**（建議） | ✓ | ✓ | ✓ | — | — | console.anthropic.com |
+| **OpenAI** | ✓ | ✓ | ✓ | ✓（Whisper、gpt-4o-transcribe） | ✓（gpt-image） | platform.openai.com |
+| **OpenRouter** | ✓（數百種模型） | ✓ | ✓ | ✓（音訊模型） | ✓ | openrouter.ai |
+| **Google Gemini** | ✓ | — | ✓ | ✓（直接聽 MP3／WAV） | ✓（Imagen） | aistudio.google.com |
+| **DeepSeek** | ✓ | — | — | — | — | platform.deepseek.com |
+| **Groq** | ✓ | — | — | ✓（whisper-large-v3，便宜快速） | — | console.groq.com |
+| **Ollama**（本機，免金鑰） | ✓ | — | 依模型 | — | — | ollama.com |
+| **其他 OpenAI 相容服務** | ✓ | — | ✓ | ✓ | ✓ | 學校自建伺服器、vLLM、LM Studio 等 |
+
+- **文字 AI**、**語音轉文字**、**圖片生成**可以分別選擇不同供應商（例如文字用 Claude、語音用 Groq、生圖用 OpenAI）。
+- 「網路搜尋研究」需要 Claude；掃描型 PDF 的文字辨識需要 Claude、OpenAI 或 OpenRouter。
+- 語音轉文字選擇繁體中文時，結果會在本機自動轉為臺灣用語（Whisper 常輸出簡體字）。
+- 金鑰存在本機 `studio/data/settings.json`（檔案權限 600），設定頁只顯示遮罩後的金鑰。舊版設定（OpenAI 相容＋自訂網址）會自動轉移。
+
+## 支援的檔案格式
+
+| 類型 | 格式 |
+|---|---|
+| 文件 | PDF、Word（.docx、.doc）、Excel（.xlsx、.xls）、PowerPoint（.pptx、.ppt，含講者備註與表格）、OpenDocument（.odt、.ods、.odp）、RTF（含 Big5 編碼）、EPUB、Email（.eml，含 Big5 編碼與附件清單）、CSV／TSV、TXT、Markdown、HTML、JSON、XML、字幕（.srt、.vtt） |
+| 圖片 | PNG、JPG、WEBP、GIF（文字辨識、圖片分析） |
+| 音檔 | MP3、M4A、WAV、WEBM、OGG、FLAC、AAC、MP4（轉錄上限 25 MB） |
+
+- 舊版 `.xls`、`.ppt`（以及少數 `.doc`）需要電腦安裝免費的 [LibreOffice](https://www.libreoffice.org) 才能讀取；未安裝時會提示另存為新格式。
+- Outlook 的 `.msg` 目前不支援，請在 Outlook 另存為 `.eml`。
+- 掃描型 PDF 與圖片需使用「掃描文件文字辨識」服務；音檔需使用「錄音轉逐字稿」等服務。
 
 ## 學術論文與被擋的網站（HTTP 403）
 
@@ -143,7 +167,7 @@ data/
 ## 測試
 
 ```bash
-npm test          # 單元、整合與服務測試（165 項，約 1 分鐘，不需網路與金鑰）
+npm test          # 單元、整合、服務、供應商與格式測試（211 項，約 2 分鐘，不需網路與金鑰）
 npm run test:ui   # 瀏覽器端到端測試（需要 Playwright）
 ```
 

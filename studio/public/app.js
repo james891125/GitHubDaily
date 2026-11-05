@@ -77,28 +77,45 @@ function liveMarkdown(el) {
 }
 
 function usageText(u) {
-  if (!u || (!u.calls && !u.cached)) return "未使用 AI（不計費）";
-  const tokens = (u.inputTokens + u.outputTokens).toLocaleString();
-  return `AI 呼叫 ${u.calls} 次${u.cached ? `、使用快取 ${u.cached} 次（未計費）` : ""}，${u.estimated ? "約 " : ""}${tokens} tokens（輸入 ${u.inputTokens.toLocaleString()}／輸出 ${u.outputTokens.toLocaleString()}）`;
+  if (!u || (!u.calls && !u.cached && !u.speech && !u.images)) return "未使用 AI（不計費）";
+  const parts = [];
+  if (u.calls || u.cached) {
+    const tokens = (u.inputTokens + u.outputTokens).toLocaleString();
+    parts.push(`AI 呼叫 ${u.calls} 次${u.cached ? `、使用快取 ${u.cached} 次（未計費）` : ""}，${u.estimated ? "約 " : ""}${tokens} tokens（輸入 ${u.inputTokens.toLocaleString()}／輸出 ${u.outputTokens.toLocaleString()}）`);
+  }
+  if (u.speech) parts.push(`語音轉文字 ${u.speech} 次（依錄音長度計費）`);
+  if (u.images) parts.push(`圖片生成 ${u.images} 張`);
+  return parts.join("；");
+}
+/** 精簡的用量文字（表格用） */
+function shortUsage(u) {
+  if (!u) return "—";
+  const parts = [];
+  if (u.calls) parts.push(`AI ${u.calls} 次／${(u.inputTokens + u.outputTokens).toLocaleString()} tokens`);
+  if (u.speech) parts.push(`語音 ${u.speech} 次`);
+  if (u.images) parts.push(`圖片 ${u.images} 張`);
+  return parts.join("、") || "—";
 }
 const cleanName = (n) => String(n || "").replace(/^\d+_/, "");
 const fmtSize = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : n > 1024 ? Math.round(n / 1024) + " KB" : (n || 0) + " B");
 const fmtTime = (s) => (s ? new Date(s).toLocaleString("zh-TW", { hour12: false }) : "");
 const STATUS = { success: ["完成", "st-ok"], error: ["失敗", "st-err"], stopped: ["條件未成立，已停止", "st-stop"], running: ["處理中", "st-run"] };
 const statusHtml = (s) => `<span class="st ${(STATUS[s] || ["", ""])[1]}">${(STATUS[s] || [s])[0]}</span>`;
-const AI_TAG = { none: ["不使用 AI", "tag-none"], light: ["少量 AI", ""], normal: ["使用 AI", ""], claude: ["需 Claude", "tag-claude"] };
+const AI_TAG = { none: ["不使用 AI", "tag-none"], light: ["少量 AI", ""], normal: ["使用 AI", ""], claude: ["需 Claude", "tag-claude"], speech: ["需語音服務", "tag-claude"], imagegen: ["需生圖服務", "tag-claude"] };
 const aiTag = (k) => `<span class="tag ${AI_TAG[k]?.[1] || ""}">${AI_TAG[k]?.[0] || ""}</span>`;
 
 function filesTable(files) {
   if (!files?.length) return "";
+  const imgs = files.filter((f) => /\.(png|jpe?g|webp|gif)$/i.test(f.name));
+  const gallery = imgs.length ? `<div class="gallery">${imgs.map((f) => `<a href="${esc(f.url)}" download="${esc(cleanName(f.name))}"><img src="${esc(f.url)}" alt="${esc(cleanName(f.name))}" /></a>`).join("")}</div>` : "";
   return `<div class="table-wrap"><table class="data-table"><thead><tr><th>檔名</th><th>大小</th><th>下載</th></tr></thead><tbody>${files
     .map((f) => `<tr><td>${esc(cleanName(f.name))}</td><td class="num">${fmtSize(f.size)}</td><td class="nowrap"><a href="${esc(f.url)}" download="${esc(cleanName(f.name))}">下載</a></td></tr>`)
-    .join("")}</tbody></table></div>`;
+    .join("")}</tbody></table></div>${gallery}`;
 }
 
 function readFileB64(file) {
   return new Promise((resolve, reject) => {
-    if (file.size > 30 * 1024 * 1024) return reject(new Error(`「${file.name}」超過 30 MB`));
+    if (file.size > 50 * 1024 * 1024) return reject(new Error(`「${file.name}」超過 50 MB`));
     const r = new FileReader();
     r.onload = () => resolve({ name: file.name, data: String(r.result).split(",")[1] || "" });
     r.onerror = () => reject(new Error("讀取檔案失敗"));
@@ -118,11 +135,13 @@ let FILES = [];
 let KBS = [];
 
 async function refreshStatus() {
-  const s = await api("/api/settings");
-  META.ready = !!(s.provider === "openai" ? s.openaiKey || /localhost|127\.0\.0\.1/.test(s.openaiBase) : s.anthropicKey);
+  const [s, meta] = await Promise.all([api("/api/settings"), api("/api/meta")]);
+  Object.assign(META, { ready: meta.ready, speechReady: meta.speechReady, imageReady: meta.imageReady, providers: meta.providers });
   const el = $("#ai-status");
   if (META.ready) {
-    const model = s.provider === "openai" ? s.openaiModel : (META.models.find((m) => m.id === s.claudeModel)?.label || s.claudeModel).replace(/（.*/, "");
+    const p = meta.providers[s.provider];
+    const raw = s[p.modelField] || "";
+    const model = s.provider === "anthropic" ? (META.models.find((m) => m.id === raw)?.label || raw).replace(/（.*/, "") : `${p.name.replace(/（.*/, "")} ${raw}`;
     el.textContent = `AI：${model}`;
     el.classList.remove("off");
   } else {
@@ -187,9 +206,11 @@ document.addEventListener("change", (e) => {
 });
 $("#menu-toggle").addEventListener("click", () => document.body.classList.toggle("menu-open"));
 
-function needKey(service) {
-  if (META.ready) return false;
-  toast(`「${service || "此功能"}」需要使用 AI，請先到系統設定輸入 API Key`);
+function needKey(service, kind = "chat") {
+  const ok = { chat: META.ready, speech: META.speechReady, imagegen: META.imageReady }[kind];
+  if (ok) return false;
+  const what = { chat: "文字 AI 的 API Key 與模型", speech: "「語音轉文字」服務", imagegen: "「圖片生成」服務" }[kind];
+  toast(`「${service || "此功能"}」需要設定${what}，請先到系統設定完成設定`, 5000);
   location.hash = "#/settings";
   return true;
 }
@@ -227,7 +248,7 @@ PAGES.home = async () => {
       ${
         recent.length
           ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>時間</th><th>項目</th><th>方式</th><th>狀態</th><th>AI 用量</th></tr></thead><tbody>${recent
-              .map((r) => `<tr><td class="nowrap">${fmtTime(r.startedAt)}</td><td>${esc(r.flowName)}</td><td class="nowrap">${r.trigger === "schedule" ? "定期執行" : "手動"}</td><td>${statusHtml(r.status)}</td><td class="nowrap">${r.usage?.calls ? r.usage.calls + " 次" : "—"}</td></tr>`)
+              .map((r) => `<tr><td class="nowrap">${fmtTime(r.startedAt)}</td><td>${esc(r.flowName)}</td><td class="nowrap">${r.trigger === "schedule" ? "定期執行" : "手動"}</td><td>${statusHtml(r.status)}</td><td class="nowrap">${shortUsage(r.usage)}</td></tr>`)
               .join("")}</tbody></table></div>`
           : `<div class="panel-body muted">尚無辦理紀錄。</div>`
       }
@@ -251,7 +272,9 @@ const AI_NOTE = {
   none: "本服務的主要功能不使用 AI，不會產生 API 費用；只有勾選標示「AI」的選項時才會呼叫 AI。",
   light: "本服務使用少量 AI（通常 1 次呼叫，並採用較低的思考深度以節省用量）。",
   normal: "本服務會使用 AI，長文件會分段處理；同樣內容重新辦理時會使用快取，不重複計費。",
-  claude: "本服務需要使用 Claude（系統設定中的 AI 供應商須為 Anthropic Claude）。",
+  claude: "本服務需要使用 Claude（系統設定中的文字 AI 供應商須為 Anthropic Claude）。",
+  speech: "本服務需要「語音轉文字」服務（系統設定 → 語音轉文字），整理內容時另使用文字 AI。",
+  imagegen: "本服務需要「圖片生成」服務（系統設定 → 圖片生成），依各服務的計價方式按張計費。",
 };
 
 function fieldHtml(f) {
@@ -292,7 +315,7 @@ function fieldHtml(f) {
         <label class="inline"><input type="radio" name="${f.key}-mode" value="library" />檔案庫</label>
         <label class="inline"><input type="radio" name="${f.key}-mode" value="text" />貼上文字</label>
         <label class="inline"><input type="radio" name="${f.key}-mode" value="url" />網址</label>
-        <div class="src-pane" data-pane="upload"><input type="file" id="${id}" accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.html,.htm,.json" /></div>
+        <div class="src-pane" data-pane="upload"><input type="file" id="${id}" accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.odt,.ods,.odp,.rtf,.epub,.eml,.csv,.tsv,.txt,.md,.html,.htm,.json,.xml,.srt,.vtt" /></div>
         <div class="src-pane hidden" data-pane="library"><select id="${id}-lib"><option value="">請選擇</option>${FILES.filter((x) => !x.needsOcr).map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join("")}</select></div>
         <div class="src-pane hidden" data-pane="text"><textarea id="${id}-text" rows="6"></textarea></div>
         <div class="src-pane hidden" data-pane="url"><input type="url" id="${id}-url" placeholder="https://" /></div>
@@ -382,7 +405,7 @@ PAGES.svc = async (id) => {
 };
 
 async function runService(svc) {
-  if (svc.ai !== "none" && needKey(svc.name)) return;
+  if (svc.ai === "speech" || svc.ai === "imagegen" ? needKey(svc.name, svc.ai) : svc.ai !== "none" && needKey(svc.name)) return;
   const box = $("#svc-result");
   const nodes = svc.nodes;
   box.innerHTML = `<div class="panel"><div class="panel-head"><span>辦理進度</span><span id="svc-status" class="muted" style="font-weight:400"></span></div>
@@ -920,7 +943,7 @@ PAGES.runs = async () => {
       ${runs
         .map(
           (r, i) => `<tr><td class="nowrap">${fmtTime(r.startedAt)}</td><td>${esc(r.flowName)}</td><td class="nowrap">${r.trigger === "schedule" ? "定期執行" : "手動"}</td><td>${statusHtml(r.status)}${r.error ? `<div class="muted">${esc(r.error)}</div>` : ""}</td>
-          <td class="nowrap">${r.usage ? `${r.usage.calls} 次／${(r.usage.inputTokens + r.usage.outputTokens).toLocaleString()} tokens` : "—"}</td>
+          <td class="nowrap">${shortUsage(r.usage)}</td>
           <td>${(r.files || []).map((f) => `<a href="${esc(f.url)}" download="${esc(cleanName(f.name))}">${esc(cleanName(f.name))}</a>`).join("<br>") || "—"}</td>
           <td><details><summary>檢視</summary><pre class="steplog" style="max-height:240px">${esc((r.logs || []).join("\n"))}</pre></details></td></tr>`,
         )
@@ -936,15 +959,15 @@ PAGES.files = async () => {
   setCrumbs([["檔案管理"]]);
   const [files, outs] = await Promise.all([api("/api/files"), api("/api/outputs")]);
   FILES = files;
-  const kind = (f) => (f.needsOcr ? `<span class="st st-stop">需文字辨識</span>` : "可直接使用");
+  const kind = (f) => (f.needsTranscribe ? `<span class="st st-stop">音檔（需轉錄）</span>` : f.needsOcr ? `<span class="st st-stop">需文字辨識</span>` : "可直接使用");
   main().innerHTML = `<h2 class="page-title">檔案管理</h2><p class="page-desc">上傳的檔案可在各項服務中直接選用；產出檔案為各服務辦理結果。</p>
     <div class="panel"><div class="panel-head">上傳檔案</div><div class="panel-body"><input type="file" id="lib-upload" multiple />
-      <div class="help muted">支援 PDF、Word、Excel、CSV、TXT、Markdown、HTML 與圖片（PNG、JPG），單檔上限 30 MB。掃描型 PDF 與圖片需使用「掃描文件文字辨識」服務。</div><div id="lib-status" class="muted"></div></div></div>
+      <div class="help muted">支援文件：PDF、Word（.docx／.doc）、Excel（.xlsx／.xls）、PowerPoint（.pptx／.ppt）、OpenDocument（.odt／.ods／.odp）、RTF、EPUB、Email（.eml）、CSV、TXT、Markdown、HTML、字幕檔；圖片：PNG、JPG、WEBP、GIF；音檔：MP3、M4A、WAV、WEBM、OGG、FLAC。單檔上限 50 MB（音檔轉錄上限 25 MB）。舊版 .doc／.xls／.ppt 需安裝 LibreOffice 才能讀取部分檔案。</div><div id="lib-status" class="muted"></div></div></div>
     <div class="panel"><div class="panel-head">檔案庫（${files.length}）</div>
     ${
       files.length
         ? `<div class="table-wrap"><table class="data-table" id="lib-table"><thead><tr><th>檔名</th><th>大小</th><th>內容</th><th>狀態</th><th>上傳時間</th><th>操作</th></tr></thead><tbody>${files
-            .map((f) => `<tr><td>${esc(f.name)}</td><td class="num">${f.size ? fmtSize(f.size) : "—"}</td><td class="nowrap">${f.needsOcr ? "—" : `${f.chars.toLocaleString()} 字${f.pages ? `，${f.pages} 頁` : ""}`}</td><td class="nowrap">${kind(f)}</td><td class="nowrap">${fmtTime(f.addedAt)}</td><td><button class="btn btn-sm btn-danger" data-del-file="${f.id}" type="button">刪除</button></td></tr>`)
+            .map((f) => `<tr><td>${esc(f.name)}</td><td class="num">${f.size ? fmtSize(f.size) : "—"}</td><td class="nowrap">${f.needsOcr || f.needsTranscribe ? "—" : `${f.chars.toLocaleString()} 字${f.pages ? `，${f.pages} 頁` : ""}`}</td><td class="nowrap">${kind(f)}</td><td class="nowrap">${fmtTime(f.addedAt)}</td><td><button class="btn btn-sm btn-danger" data-del-file="${f.id}" type="button">刪除</button></td></tr>`)
             .join("")}</tbody></table></div>`
         : `<div class="panel-body muted">尚無檔案。</div>`
     }</div>
@@ -963,7 +986,7 @@ PAGES.files = async () => {
       $("#lib-status").textContent = `上傳「${file.name}」中…`;
       try {
         const f = await uploadFile(file);
-        msgs.push(`「${file.name}」上傳完成${f.needsOcr ? "（掃描檔／圖片，需文字辨識）" : ""}`);
+        msgs.push(`「${file.name}」上傳完成${f.needsTranscribe ? "（音檔，可用於錄音轉逐字稿）" : f.needsOcr ? "（掃描檔／圖片，需文字辨識）" : ""}`);
       } catch (err) {
         msgs.push(`「${file.name}」上傳失敗：${err.message}`);
       }
@@ -985,73 +1008,118 @@ PAGES.files = async () => {
 // =====================================================================
 PAGES.settings = async () => {
   setCrumbs([["系統設定"]]);
-  const [s, u] = await Promise.all([api("/api/settings"), api("/api/usage")]);
+  const [s, u, meta] = await Promise.all([api("/api/settings"), api("/api/usage"), api("/api/meta")]);
+  META.providers = meta.providers;
+  const P = META.providers;
   const opt = (o, v) => Object.entries(o).map(([k, l]) => `<option value="${esc(k)}" ${String(k) === String(v) ? "selected" : ""}>${esc(l)}</option>`).join("");
+  const provOpts = (filter, v, none) => (none ? `<option value="">${esc(none)}</option>` : "") + Object.entries(P).filter(([, p]) => filter(p)).map(([id, p]) => `<option value="${id}" ${id === v ? "selected" : ""}>${esc(p.name)}</option>`).join("");
+  const keyRows = Object.entries(P)
+    .map(([id, p]) => {
+      const fields = [];
+      if (p.baseField) fields.push(`<input data-s="${p.baseField}" value="${esc(s[p.baseField] || "")}" placeholder="服務網址，例如 ${id === "ollama" ? "http://localhost:11434/v1" : "https://your-server/v1"}" />`);
+      if (p.keyField) fields.push(`<input type="password" data-s="${p.keyField}" value="${esc(s[p.keyField] || "")}" autocomplete="off" placeholder="${id === "anthropic" ? "sk-ant-…" : "API Key"}${p.baseField ? "（選填）" : ""}" />`);
+      return `<tr data-prov="${id}"><th>${esc(p.name)}</th><td>${fields.join("<div style='height:4px'></div>") || '<span class="muted">免金鑰</span>'}<div class="help">${esc(p.note)}${p.keyUrl ? `　<a href="${esc(p.keyUrl)}" target="_blank" rel="noopener">${p.noKey ? "下載" : "申請金鑰"}</a>` : ""}</div></td><td class="nowrap prov-st">${p.ready ? '<span class="st st-ok">已設定</span>' : '<span class="st st-skip">未設定</span>'}</td></tr>`;
+    })
+    .join("");
+  const chatModelField = P[s.provider]?.modelField || "claudeModel";
   main().innerHTML = `<h2 class="page-title">系統設定</h2>
-    <p class="page-desc">金鑰儲存於本機 studio/data/settings.json（僅本機可讀），只會傳送給您選擇的 AI 服務。</p>
+    <p class="page-desc">金鑰儲存於本機 studio/data/settings.json（僅本機可讀），只會傳送給對應的 AI 服務。各家金鑰分開保存，切換供應商不會遺失。</p>
     <form id="settings-form">
-    <div class="panel"><div class="panel-head">AI 服務</div><table class="form-table"><tbody>
-      <tr><th><span class="req">*</span>供應商</th><td><select id="s-provider">${opt({ anthropic: "Anthropic Claude（建議，功能最完整）", openai: "OpenAI 相容服務（OpenAI、DeepSeek、Gemini、OpenRouter、Ollama…）" }, s.provider)}</select></td></tr>
-      <tbody id="s-claude" class="${s.provider === "openai" ? "hidden" : ""}">
-        <tr><th>Claude API Key</th><td><input type="password" id="s-akey" value="${esc(s.anthropicKey)}" autocomplete="off" placeholder="sk-ant-…" /></td></tr>
-        <tr><th>模型</th><td><select id="s-cmodel">${opt(Object.fromEntries(META.models.map((m) => [m.id, m.label])), s.claudeModel)}</select></td></tr>
-        <tr><th>思考深度</th><td><select id="s-effort">${opt({ "": "預設", low: "low（最快、最省）", medium: "medium", high: "high", xhigh: "xhigh（最仔細）" }, s.effort)}</select></td></tr>
-      </tbody>
-      <tbody id="s-openai" class="${s.provider === "openai" ? "" : "hidden"}">
-        <tr><th>API Key</th><td><input type="password" id="s-okey" value="${esc(s.openaiKey)}" autocomplete="off" placeholder="sk-…（本機 Ollama 可留空）" /></td></tr>
-        <tr><th>Base URL</th><td><input id="s-obase" value="${esc(s.openaiBase)}" /><div class="help">OpenAI：https://api.openai.com/v1　DeepSeek：https://api.deepseek.com/v1　Gemini：https://generativelanguage.googleapis.com/v1beta/openai　OpenRouter：https://openrouter.ai/api/v1　Ollama：http://localhost:11434/v1</div></td></tr>
-        <tr><th>模型名稱</th><td><input id="s-omodel" value="${esc(s.openaiModel)}" /></td></tr>
-      </tbody>
+    <div class="panel"><div class="panel-head">API 金鑰</div><div class="table-wrap"><table class="form-table"><tbody>${keyRows}</tbody></table></div></div>
+
+    <div class="panel"><div class="panel-head">文字 AI（主要）</div><table class="form-table"><tbody>
+      <tr><th><span class="req">*</span>供應商</th><td><select id="s-provider" data-s="provider">${provOpts((p) => p.can.chat, s.provider)}</select><div class="help" id="s-provider-note"></div></td></tr>
+      <tr><th><span class="req">*</span>模型</th><td><input id="s-model" data-model-for="chat" list="dl-chat" value="${esc(s[chatModelField] || "")}" placeholder="按右側按鈕從 API 取得清單，或直接輸入模型名稱" />
+        <datalist id="dl-chat"></datalist> <button type="button" class="btn btn-sm" data-list="chat">取得模型清單</button><div class="model-list" id="ml-chat"></div></td></tr>
+      <tr id="row-effort"><th>思考深度（Claude）</th><td><select data-s="effort">${opt({ "": "預設", low: "low（最快、最省）", medium: "medium", high: "high", xhigh: "xhigh（最仔細）" }, s.effort)}</select></td></tr>
     </tbody></table></div>
+
+    <div class="panel"><div class="panel-head">語音轉文字（錄音檔）</div><table class="form-table"><tbody>
+      <tr><th>服務</th><td><select id="s-speech" data-s="speechProvider">${provOpts((p) => p.can.speech || p.can.audioInput, s.speechProvider, "不使用（或自動使用文字 AI 供應商）")}</select>
+        <div class="help">Claude 無法直接處理音檔。建議：Groq（便宜、快速，有時間軸）或 OpenAI（gpt-4o-transcribe 準確度高）；Gemini、OpenRouter 也可直接聽 MP3／WAV。</div></td></tr>
+      <tr><th>模型</th><td><input id="s-speech-model" data-s="speechModel" data-model-for="speech" list="dl-speech" value="${esc(s.speechModel || "")}" placeholder="留空使用建議模型" /><datalist id="dl-speech"></datalist>
+        <button type="button" class="btn btn-sm" data-list="speech">取得模型清單</button><div class="model-list" id="ml-speech"></div></td></tr>
+    </tbody></table></div>
+
+    <div class="panel"><div class="panel-head">圖片生成</div><table class="form-table"><tbody>
+      <tr><th>服務</th><td><select id="s-image" data-s="imageProvider">${provOpts((p) => p.can.imageGen, s.imageProvider, "不使用")}</select>
+        <div class="help">Claude 無法產生圖片。OpenAI 使用 gpt-image；Gemini 使用 Imagen；OpenRouter 可選多種生圖模型。</div></td></tr>
+      <tr><th>模型</th><td><input id="s-image-model" data-s="imageModel" data-model-for="image" list="dl-image" value="${esc(s.imageModel || "")}" placeholder="留空使用建議模型" /><datalist id="dl-image"></datalist>
+        <button type="button" class="btn btn-sm" data-list="image">取得模型清單</button><div class="model-list" id="ml-image"></div></td></tr>
+    </tbody></table></div>
+
     <div class="panel"><div class="panel-head">用量控管</div><table class="form-table"><tbody>
-      <tr><th>用量模式</th><td><select id="s-mode">${opt({ economy: "省用量（建議）：翻譯、擷取等機械性工作使用較低思考深度", quality: "品質優先：所有工作都使用上方設定的思考深度" }, s.usageMode)}</select></td></tr>
-      <tr><th>回應快取</th><td><select id="s-cache">${opt({ 0: "不快取", 1: "1 天", 7: "7 天（建議）", 30: "30 天" }, s.cacheDays)}</select> <button class="btn btn-sm" id="s-clear-cache" type="button">清除快取</button><div class="help">相同內容重新辦理時直接使用先前結果，不重複呼叫 AI。</div></td></tr>
-      <tr><th>用量統計</th><td><table class="data-table" id="usage-table"><thead><tr><th>期間</th><th>AI 呼叫</th><th>快取節省</th><th>輸入 tokens</th><th>輸出 tokens</th></tr></thead><tbody>
-        ${[["今日", u.today], ["本月", u.month]].map(([t, x]) => `<tr><td>${t}</td><td class="num">${x.calls.toLocaleString()} 次</td><td class="num">${x.cached.toLocaleString()} 次</td><td class="num">${x.inputTokens.toLocaleString()}</td><td class="num">${x.outputTokens.toLocaleString()}</td></tr>`).join("")}
-      </tbody></table></td></tr>
+      <tr><th>用量模式</th><td><select data-s="usageMode">${opt({ economy: "省用量（建議）：翻譯、擷取等機械性工作使用較低思考深度", quality: "品質優先：所有工作都使用設定的思考深度" }, s.usageMode)}</select></td></tr>
+      <tr><th>回應快取</th><td><select data-s="cacheDays" id="s-cache">${opt({ 0: "不快取", 1: "1 天", 7: "7 天（建議）", 30: "30 天" }, s.cacheDays)}</select> <button class="btn btn-sm" id="s-clear-cache" type="button">清除快取</button><div class="help">相同內容重新辦理時直接使用先前結果，不重複呼叫 AI。</div></td></tr>
+      <tr><th>用量統計</th><td><div class="table-wrap"><table class="data-table" id="usage-table"><thead><tr><th>期間</th><th>AI 呼叫</th><th>快取節省</th><th>輸入 tokens</th><th>輸出 tokens</th><th>語音轉文字</th><th>圖片生成</th></tr></thead><tbody>
+        ${[["今日", u.today], ["本月", u.month]].map(([t, x]) => `<tr><td>${t}</td><td class="num">${x.calls.toLocaleString()} 次</td><td class="num">${x.cached.toLocaleString()} 次</td><td class="num">${x.inputTokens.toLocaleString()}</td><td class="num">${x.outputTokens.toLocaleString()}</td><td class="num">${(x.speech || 0).toLocaleString()} 次</td><td class="num">${(x.images || 0).toLocaleString()} 張</td></tr>`).join("")}
+      </tbody></table></div></td></tr>
     </tbody></table></div>
     <div class="panel"><div class="panel-head">學術論文（選填）</div><table class="form-table"><tbody>
-      <tr><th>Elsevier API Key</th><td><input type="password" id="s-elskey" value="${esc(s.elsevierKey)}" autocomplete="off" /><div class="help">至 dev.elsevier.com 免費申請；在有訂閱的校園網路下可取得 Elsevier 論文全文。</div></td></tr>
-      <tr><th>Institution Token</th><td><input type="password" id="s-elstoken" value="${esc(s.elsevierInstToken)}" autocomplete="off" /><div class="help">校外使用時由圖書館提供。</div></td></tr>
+      <tr><th>Elsevier API Key</th><td><input type="password" data-s="elsevierKey" value="${esc(s.elsevierKey)}" autocomplete="off" /><div class="help">至 dev.elsevier.com 免費申請；在有訂閱的校園網路下可取得 Elsevier 論文全文。</div></td></tr>
+      <tr><th>Institution Token</th><td><input type="password" data-s="elsevierInstToken" value="${esc(s.elsevierInstToken)}" autocomplete="off" /><div class="help">校外使用時由圖書館提供。</div></td></tr>
     </tbody></table></div>
     <div class="panel"><div class="panel-head">通知</div><table class="form-table"><tbody>
-      <tr><th>Webhook 網址</th><td><input id="s-webhook" value="${esc(s.webhookUrl)}" placeholder="https://hooks.slack.com/… 或 https://discord.com/api/webhooks/…" /><div class="help">服務勾選「發送通知」時，結果會傳送到此網址（支援 Slack、Discord、Teams）。</div></td></tr>
+      <tr><th>Webhook 網址</th><td><input data-s="webhookUrl" id="s-webhook" value="${esc(s.webhookUrl)}" placeholder="https://hooks.slack.com/… 或 https://discord.com/api/webhooks/…" /><div class="help">服務勾選「發送通知」時，結果會傳送到此網址（支援 Slack、Discord、Teams）。</div></td></tr>
     </tbody></table></div>
-    <div class="form-actions"><button class="btn btn-primary" type="submit">儲存設定</button><button class="btn" type="button" id="s-test">測試 AI 連線</button></div>
+    <div class="form-actions"><button class="btn btn-primary" type="submit">儲存設定</button><button class="btn" type="button" id="s-test">測試文字 AI 連線</button></div>
     <div id="s-status" class="muted" style="text-align:center"></div>
     </form>`;
+
+  const updateProvider = () => {
+    const id = $("#s-provider").value;
+    $("#s-provider-note").textContent = P[id]?.note || "";
+    $("#row-effort").classList.toggle("hidden", id !== "anthropic");
+  };
+  updateProvider();
+  $("#s-provider").addEventListener("change", () => {
+    updateProvider();
+    // 切換供應商時，帶出該供應商先前選的模型
+    $("#s-model").value = s[P[$("#s-provider").value]?.modelField] || "";
+    $("#ml-chat").innerHTML = "";
+  });
+  // 建議的語音／生圖模型
+  const suggest = (sel, dl, key) => {
+    const p = P[$(sel).value];
+    $(dl).innerHTML = (p?.[key] || []).map((m) => `<option value="${esc(m)}">`).join("");
+  };
+  suggest("#s-speech", "#dl-speech", "speechModels");
+  suggest("#s-image", "#dl-image", "imageModels");
+  $("#s-speech").addEventListener("change", () => (suggest("#s-speech", "#dl-speech", "speechModels"), ($("#s-speech-model").value = "")));
+  $("#s-image").addEventListener("change", () => (suggest("#s-image", "#dl-image", "imageModels"), ($("#s-image-model").value = "")));
+
+  const collect = () => {
+    const patch = {};
+    $$("[data-s]").forEach((el) => (patch[el.dataset.s] = el.type === "checkbox" ? el.checked : el.value.trim()));
+    patch.cacheDays = Number(patch.cacheDays);
+    patch[P[patch.provider].modelField] = $("#s-model").value.trim();
+    return patch;
+  };
   let dirty = false;
   $("#settings-form").addEventListener("input", () => (dirty = true));
-  $("#s-provider").addEventListener("change", (e) => {
-    $("#s-claude").classList.toggle("hidden", e.target.value === "openai");
-    $("#s-openai").classList.toggle("hidden", e.target.value !== "openai");
-  });
   const save = async () => {
-    const r = await post("/api/settings", {
-      provider: $("#s-provider").value,
-      anthropicKey: $("#s-akey").value.trim(),
-      claudeModel: $("#s-cmodel").value,
-      effort: $("#s-effort").value,
-      openaiKey: $("#s-okey").value.trim(),
-      openaiBase: $("#s-obase").value.trim(),
-      openaiModel: $("#s-omodel").value.trim(),
-      webhookUrl: $("#s-webhook").value.trim(),
-      elsevierKey: $("#s-elskey").value.trim(),
-      elsevierInstToken: $("#s-elstoken").value.trim(),
-      usageMode: $("#s-mode").value,
-      cacheDays: Number($("#s-cache").value),
-    });
-    $("#s-akey").value = r.anthropicKey;
-    $("#s-okey").value = r.openaiKey;
-    $("#s-elskey").value = r.elsevierKey;
-    $("#s-elstoken").value = r.elsevierInstToken;
+    await post("/api/settings", collect());
     dirty = false;
+    const fresh = await api("/api/settings");
+    Object.assign(s, fresh);
+    $$("[data-s]").forEach((el) => {
+      if (/(Key|Token)$/.test(el.dataset.s)) el.value = fresh[el.dataset.s] || "";
+    });
     await refreshStatus();
+    // 更新各家金鑰的「已設定／未設定」狀態
+    for (const [id, p] of Object.entries(META.providers)) {
+      const cell = $(`tr[data-prov="${id}"] .prov-st`);
+      if (cell) cell.innerHTML = p.ready ? '<span class="st st-ok">已設定</span>' : '<span class="st st-skip">未設定</span>';
+    }
   };
   $("#settings-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    await save();
-    $("#s-status").textContent = "設定已儲存。";
+    try {
+      await save();
+      $("#s-status").innerHTML = `<span class="st st-ok">設定已儲存</span>`;
+    } catch (err) {
+      $("#s-status").innerHTML = `<span class="st st-err">儲存失敗</span>：${esc(err.message)}`;
+    }
   });
   $("#s-test").addEventListener("click", async () => {
     if (dirty) await save();
@@ -1062,6 +1130,48 @@ PAGES.settings = async () => {
   $("#s-clear-cache").addEventListener("click", async () => {
     const r = await post("/api/cache/clear", {});
     toast(`已清除 ${r.removed} 筆快取`);
+  });
+
+  // 從 API 取得模型清單（綁在每次重新產生的表單上，避免重複綁定）
+  $("#settings-form").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-list]");
+    const pick = e.target.closest("[data-pick]");
+    if (pick) {
+      const purpose = pick.closest(".model-list").id.replace("ml-", "");
+      const input = $(`[data-model-for="${purpose}"]`);
+      input.value = pick.dataset.pick;
+      dirty = true;
+      pick.closest(".model-list").innerHTML = `<div class="help">已選擇「${esc(pick.dataset.pick)}」，請按「儲存設定」。</div>`;
+      return;
+    }
+    if (!b) return;
+    const purpose = b.dataset.list;
+    const provider = { chat: $("#s-provider").value, speech: $("#s-speech").value || $("#s-provider").value, image: $("#s-image").value }[purpose];
+    const box = $(`#ml-${purpose}`);
+    if (!provider) return (box.innerHTML = `<div class="help">請先選擇服務。</div>`);
+    if (dirty) await save();
+    box.innerHTML = `<div class="help">取得 ${esc(P[provider].name)} 的模型清單中…</div>`;
+    try {
+      const { models } = await api(`/api/models?provider=${provider}&purpose=${purpose}`);
+      $(`#dl-${purpose}`).innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("");
+      const hasPrice = models.some((m) => m.price);
+      const hasIn = models.some((m) => m.input);
+      const kind = { text: "文字", image: "圖片", audio: "音訊", file: "PDF", pdf: "PDF", video: "影片" };
+      box.innerHTML = models.length
+        ? `<div class="toolbar" style="margin-top:6px"><input type="search" class="ml-filter" placeholder="篩選（共 ${models.length} 個模型）" style="max-width:260px" /></div>
+          <div class="table-wrap" style="max-height:320px;overflow:auto"><table class="data-table"><thead><tr><th>模型</th>${hasIn ? "<th>可輸入</th>" : ""}<th>上下文</th>${hasPrice ? "<th>價格（每百萬 tokens，美元）</th>" : ""}<th></th></tr></thead><tbody>
+          ${models
+            .map(
+              (m) => `<tr data-q="${esc((m.id + " " + m.name).toLowerCase())}"><td>${esc(m.name)}${m.name !== m.id ? `<div class="muted">${esc(m.id)}</div>` : ""}</td>${hasIn ? `<td>${esc((m.input || []).map((x) => kind[x] || x).join("、"))}</td>` : ""}<td class="num">${m.context ? m.context.toLocaleString() : "—"}</td>${hasPrice ? `<td class="nowrap">${m.price ? `輸入 ${m.price.input ?? "—"}／輸出 ${m.price.output ?? "—"}` : "—"}</td>` : ""}<td><button type="button" class="btn btn-sm" data-pick="${esc(m.id)}">選用</button></td></tr>`,
+            )
+            .join("")}</tbody></table></div>`
+        : `<div class="help">這個服務沒有回傳符合用途的模型，可以直接輸入模型名稱。</div>`;
+      const f = $(".ml-filter", box);
+      // 注意：清單位於設定表格內，需用「> tbody > tr」只選到清單本身的資料列
+      f?.addEventListener("input", () => $$(".data-table > tbody > tr", box).forEach((tr) => tr.classList.toggle("hidden", !(tr.dataset.q || "").includes(f.value.toLowerCase()))));
+    } catch (err) {
+      box.innerHTML = `<div class="alert">${esc(err.message)}</div>`;
+    }
   });
 };
 

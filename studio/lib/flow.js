@@ -9,6 +9,7 @@ import { translate, summarize, extractTable, toCsv, toXlsx, toMarkdownTable, com
 import { parseDocument } from "./docs.js";
 import * as kb from "./kb.js";
 import { markdownToDocx } from "./docx.js";
+import { transcribe, toSrt, toVtt, toTimestamped, generateImages, AUDIO_TYPES } from "./media.js";
 import { searchPapers, papersToTable, readFeed, formatCitations, CITE_STYLES, convertChinese, ZH_MODES, compareTexts, parseTable, tableStats } from "./tools.js";
 
 // ---------- 節點定義（前端依此產生表單） ----------
@@ -123,7 +124,7 @@ export const NODE_TYPES = {
     desc: "存成 Markdown / 文字 / CSV / Excel / JSON",
     fields: {
       source: { label: "內容", type: "text", default: "{{ai}}" },
-      format: { label: "格式", type: "select", options: { docx: "Word (.docx)", md: "Markdown (.md)", txt: "文字 (.txt)", csv: "CSV", xlsx: "Excel (.xlsx)", json: "JSON" }, default: "md" },
+      format: { label: "格式", type: "select", options: { docx: "Word (.docx)", md: "Markdown (.md)", txt: "文字 (.txt)", csv: "CSV", xlsx: "Excel (.xlsx)", json: "JSON", srt: "字幕 (.srt)", vtt: "字幕 (.vtt)" }, default: "md" },
       formal: { label: "Word 使用標楷體（公文等正式文件）", type: "checkbox", default: false },
       filename: { label: "檔名", type: "text", default: "報告-{{today}}" },
     },
@@ -183,6 +184,33 @@ export const NODE_TYPES = {
     fields: { prompt: { label: "研究問題", type: "textarea", default: "{{input}}" }, maxSearches: { label: "最多搜尋次數", type: "number", default: 5 } },
     out: "research",
   },
+  transcribe: {
+    label: "語音轉文字",
+    desc: "將錄音檔轉成逐字稿（使用系統設定中的語音轉文字服務：OpenAI、Groq、Gemini 或 OpenRouter）",
+    fields: {
+      fileId: { label: "音檔", type: "file", default: "" },
+      language: { label: "語言", type: "select", options: { "zh-TW": "繁體中文", en: "English", ja: "日本語", ko: "한국어", auto: "自動偵測" }, default: "zh-TW" },
+      prompt: { label: "專有名詞提示（選填）", type: "text", default: "" },
+    },
+    out: "transcript",
+  },
+  image_ask: {
+    label: "圖片分析",
+    desc: "讓 AI 看圖片並回答問題（例如解讀圖表、說明示意圖、產生替代文字）",
+    fields: { fileId: { label: "圖片", type: "file", default: "" }, question: { label: "問題", type: "textarea", default: "請詳細說明這張圖片的內容。" } },
+    out: "ai",
+  },
+  image_gen: {
+    label: "圖片生成",
+    desc: "由 AI 依描述產生圖片（使用系統設定中的圖片生成服務）",
+    fields: {
+      prompt: { label: "圖片描述", type: "textarea", default: "{{input}}" },
+      size: { label: "尺寸", type: "select", options: { "1024x1024": "正方形 1024×1024", "1536x1024": "橫式 1536×1024", "1024x1536": "直式 1024×1536" }, default: "1024x1024" },
+      n: { label: "張數", type: "number", default: 1 },
+      filename: { label: "檔名", type: "text", default: "圖片-{{today}}" },
+    },
+    out: "images",
+  },
   webhook: {
     label: "發送通知",
     desc: "POST 到 Slack / Discord / Teams 等 Webhook",
@@ -214,6 +242,8 @@ export function stringify(v) {
       .join("\n\n");
   if (v.__type === "feed") return v.items.map((i) => `- [${i.title}](${i.link})（${i.feed}${i.date ? "，" + i.date : ""}）${i.summary ? "：" + i.summary.slice(0, 200) : ""}`).join("\n");
   if (v.__type === "diff") return v.markdown;
+  if (v.__type === "transcript") return v.segments ? v.timed : v.text;
+  if (v.__type === "images") return `已產生 ${v.files.length} 張圖片（請見「產出檔案」）。\n\n描述：${v.prompt}`;
   if (v.__type === "stats") return `${v.markdown}\n\n## 前 5 筆資料\n\n${v.sample}`;
   return JSON.stringify(v, null, 2);
 }
@@ -262,10 +292,12 @@ export async function addFile(name, buf) {
   let kind;
   let pages;
   let needsOcr = false;
-  if (IMAGE_TYPES[ext]) {
-    if (!buf?.length) throw Object.assign(new Error("檔案是空的"), { status: 422 });
-    kind = "image";
-    needsOcr = true;
+  let needsTranscribe = false;
+  if (IMAGE_TYPES[ext] || AUDIO_TYPES[ext]) {
+    if (!buf?.length) throw Object.assign(new Error("檔案是空的，沒有可處理的內容"), { status: 422 });
+    kind = IMAGE_TYPES[ext] ? "image" : "audio";
+    needsOcr = kind === "image";
+    needsTranscribe = kind === "audio";
   } else {
     try {
       const parsed = await parseDocument(name, buf);
@@ -281,7 +313,7 @@ export async function addFile(name, buf) {
   }
   fs.writeFileSync(path.join(FILES_DIR, id + ".txt"), text);
   fs.writeFileSync(path.join(FILES_DIR, id + ext), buf);
-  const meta = { id, name, ext, kind, pages, chars: text.length, size: buf.length, needsOcr, addedAt: new Date().toISOString() };
+  const meta = { id, name, ext, kind, pages, chars: text.length, size: buf.length, needsOcr, needsTranscribe, addedAt: new Date().toISOString() };
   save("files-index", [meta, ...listFiles()]);
   return { ...meta, text };
 }
@@ -292,6 +324,7 @@ export function getFileMeta(id) {
 }
 export function getFileText(id) {
   const meta = getFileMeta(id);
+  if (meta.needsTranscribe) throw Object.assign(new Error(`「${meta.name}」是音檔，請使用「錄音轉逐字稿」或「會議錄音整理」服務先轉成文字`), { status: 422 });
   if (meta.needsOcr) throw Object.assign(new Error(`「${meta.name}」是掃描檔或圖片，沒有文字可讀取。請使用「掃描文件文字辨識」服務先轉成文字`), { status: 422 });
   return { meta, text: fs.readFileSync(path.join(FILES_DIR, id + ".txt"), "utf8") };
 }
@@ -483,6 +516,34 @@ async function runNode(rawNode, vars, ctx) {
       const refs = (r.sources || []).map((x, i) => `${i + 1}. [${x.title}](${x.url})`).join("\n");
       return r.text + (refs ? `\n\n## 參考來源\n\n${refs}` : "");
     }
+    case "transcribe": {
+      const { meta, buf } = getFileRaw(render(node.fileId, vars));
+      if (!AUDIO_TYPES[meta.ext]) throw Object.assign(new Error(`「${meta.name}」不是音檔。支援：${Object.keys(AUDIO_TYPES).join("、")}`), { status: 422 });
+      log(`轉錄「${meta.name}」中…（${(buf.length / 1048576).toFixed(1)} MB，長錄音需要較久）`);
+      const r = await transcribe(buf, { name: meta.name, language: node.language, prompt: render(node.prompt || "", vars), signal });
+      log(`完成（${r.provider}／${r.model}），${r.text.length} 字${r.segments ? `、${r.segments.length} 段` : ""}`);
+      return { __type: "transcript", name: meta.name, text: r.text, timed: r.segments ? toTimestamped(r.segments) : r.text, segments: r.segments || null };
+    }
+    case "image_ask": {
+      const { meta, buf } = getFileRaw(render(node.fileId, vars));
+      if (!IMAGE_TYPES[meta.ext]) throw Object.assign(new Error("圖片分析支援 PNG、JPG、WEBP、GIF"), { status: 422 });
+      const { text } = await generate({ prompt: render(node.question, vars), system: "請使用繁體中文回答，以 Markdown 格式輸出。", attachments: [{ kind: "image", mediaType: IMAGE_TYPES[meta.ext], data: buf.toString("base64"), name: meta.name }] }, onText, signal);
+      return text;
+    }
+    case "image_gen": {
+      const prompt = render(node.prompt, vars).trim();
+      if (!prompt) throw Object.assign(new Error("請輸入圖片描述"), { status: 400 });
+      log(`產生 ${Number(node.n) || 1} 張圖片中…`);
+      const imgs = await generateImages(prompt, { size: node.size, n: node.n, signal });
+      const base = render(node.filename || "圖片", vars);
+      const files = imgs.map((im, i) => {
+        const f = writeOutput(`${base}${imgs.length > 1 ? `-${i + 1}` : ""}.${im.ext}`, im.buf);
+        emit({ type: "file", node: node.id, file: f });
+        return f;
+      });
+      log(`完成 ${files.length} 張`);
+      return { __type: "images", files, prompt };
+    }
     case "read_file": {
       const { meta, text } = getFileText(render(node.fileId, vars));
       log(`讀取「${meta.name}」，${text.length} 字`);
@@ -634,7 +695,10 @@ async function runNode(rawNode, vars, ctx) {
         data = fmt === "csv" ? toCsv(table) : await toXlsx(table);
       } else if (fmt === "json") data = JSON.stringify(src?.__type === "papers" ? src.papers : src, null, 2);
       else if (fmt === "docx") data = await markdownToDocx(stringify(src), { formal: !!node.formal });
-      else data = stringify(src);
+      else if (fmt === "srt" || fmt === "vtt") {
+        if (src?.__type !== "transcript" || !src.segments) throw Object.assign(new Error("字幕檔需要含時間軸的逐字稿（使用 OpenAI 或 Groq 的 Whisper 模型轉錄）"), { status: 422 });
+        data = fmt === "srt" ? toSrt(src.segments) : toVtt(src.segments);
+      } else data = stringify(src);
       const f = writeOutput(`${base}.${fmt}`, data);
       log(`已儲存「${f.name.replace(/^\d+_/, "")}」`);
       emit({ type: "file", node: node.id, file: f });

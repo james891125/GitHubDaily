@@ -1,0 +1,24 @@
+Content-Type: multipart/mixed; boundary="===============3108403765069171196=="
+MIME-Version: 1.0
+Subject: =?big5?b?t3zEs7Nxqr6hR6h0sMi3fMSz?=
+From: office@example.edu.tw
+To: all@example.edu.tw
+Date: Wed, 05 Nov 2026 09:00:00 +0800
+
+--===============3108403765069171196==
+Content-Type: text/plain; charset="big5"
+MIME-Version: 1.0
+Content-Transfer-Encoding: base64
+
+plWm7KbRrnambqFHCqh0sMi3fMSzrXGp8yAxMSCk6yAyMCCk6aRVpMio4sJJwXym5qFBvdC3x67J
+pViudaFD
+
+--===============3108403765069171196==
+Content-Type: application/octet-stream; Name*=utf-8''%E8%AD%B0%E7%A8%8B.txt
+MIME-Version: 1.0
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="agenda.txt"
+
+YWdlbmRh
+
+--===============3108403765069171196==--

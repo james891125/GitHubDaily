@@ -13,7 +13,9 @@ export const toPdfjsDir = (p, sep = path.sep) => p.split(sep).join("/").replace(
 const CMAP_URL = toPdfjsDir(path.join(PDFJS_DIR, "cmaps"));
 const FONT_URL = toPdfjsDir(path.join(PDFJS_DIR, "standard_fonts"));
 
-export const SUPPORTED = [".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md", ".markdown", ".html", ".htm", ".json"];
+import { parseExtraFormat, EXTRA_FORMATS } from "./formats.js";
+
+export const SUPPORTED = [".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md", ".markdown", ".html", ".htm", ".json", ...EXTRA_FORMATS];
 
 async function pdfToText(buf) {
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
@@ -128,8 +130,11 @@ async function parseDocumentInner(filename, buf) {
     case ".markdown":
     case ".json":
       return { text: decodeText(buf), kind: ext.slice(1) };
-    default:
+    default: {
+      const r = await parseExtraFormat(ext, buf, { htmlToMarkdown, decodeText, parseDocument });
+      if (r) return r;
       throw new Error(`不支援的檔案格式：${ext || "（無副檔名）"}。支援：${SUPPORTED.join("、")}`);
+    }
   }
 }
 

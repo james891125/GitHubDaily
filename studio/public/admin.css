@@ -217,3 +217,10 @@ del { background: #fbdcd8; color: #8e1b10; }
   .svc-table td:nth-child(2) { grid-column: 1 / -1; grid-row: 2; padding: 0 10px 8px; color: var(--muted); font-size: 13px; }
   .svc-table td:nth-child(3) { grid-row: 1; grid-column: 2; }
 }
+
+/* 模型清單 */
+.model-list { margin-top: 4px; }
+.model-list .data-table td, .model-list .data-table th { padding: 4px 8px; font-size: 13.5px; }
+
+.gallery { display: flex; flex-wrap: wrap; gap: 10px; padding: 10px; }
+.gallery img { max-width: 240px; max-height: 240px; border: 1px solid var(--line); background: var(--code); }

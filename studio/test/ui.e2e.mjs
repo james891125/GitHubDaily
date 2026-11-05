@@ -82,32 +82,78 @@ await step("麵包屑與選單：服務頁顯示正確位置、選單展開所�
 });
 
 // ---------------- 系統設定 ----------------
-async function setProvider(kind) {
-  await go("#/settings");
-  if (kind === "claude") {
-    await p.selectOption("#s-provider", "anthropic");
-    await p.fill("#s-akey", "sk-ant-test");
-    await p.selectOption("#s-cmodel", "claude-opus-5-5");
-  } else {
-    await p.selectOption("#s-provider", "openai");
-    await p.fill("#s-okey", "sk-test");
-    await p.fill("#s-obase", world.openai.base);
-    await p.fill("#s-omodel", "mock");
-  }
-  await p.fill("#s-webhook", world.webhook.url);
-  await p.selectOption("#s-cache", "0");
+async function testConnection() {
   await p.evaluate(() => (document.querySelector("#s-status").textContent = ""));
   await p.click("#s-test");
   await p.waitForFunction(() => /連線成功|連線失敗/.test(document.querySelector("#s-status").textContent));
   return p.textContent("#s-status");
 }
-await step("系統設定：OpenAI 相容服務連線成功", async () => {
-  const st = await setProvider("openai");
+async function saveSettings() {
+  await p.evaluate(() => (document.querySelector("#s-status").textContent = ""));
+  await p.click("#settings-form button[type=submit]");
+  await p.waitForFunction(() => /設定已儲存|儲存失敗/.test(document.querySelector("#s-status").textContent));
+  return p.textContent("#s-status");
+}
+/** 在模型清單中挑選模型 */
+async function pickModel(purpose, id) {
+  await p.click(`[data-list="${purpose}"]`);
+  await p.waitForSelector(`#ml-${purpose} [data-pick], #ml-${purpose} .alert`);
+  const err = await p.evaluate((pp) => document.querySelector(`#ml-${pp} .alert`)?.textContent, purpose);
+  if (err) throw new Error(err);
+  await p.click(`#ml-${purpose} [data-pick="${id}"]`);
+}
+await step("系統設定：其他 OpenAI 相容服務（自訂網址）連線成功，金鑰遮罩", async () => {
+  await go("#/settings");
+  await p.fill("[data-s=customBase]", world.openai.base);
+  await p.fill("[data-s=customKey]", "sk-test");
+  await p.selectOption("#s-provider", "custom");
+  await p.fill("#s-model", "mock");
+  await p.fill("#s-webhook", world.webhook.url);
+  await p.selectOption("#s-cache", "0");
+  const st = await testConnection();
   assert(st.includes("連線成功"), st);
-  assert((await p.inputValue("#s-okey")).includes("•"), "金鑰應遮罩");
+  assert((await p.inputValue("[data-s=customKey]")).includes("•"), "金鑰應遮罩");
+});
+await step("系統設定：OpenRouter 從 API 取得模型清單（含價格與輸入類型），選用後連線成功", async () => {
+  await go("#/settings");
+  await p.fill("[data-s=openrouterKey]", "sk-or-test");
+  await p.selectOption("#s-provider", "openrouter");
+  assert((await p.textContent("#s-provider-note")).includes("數百種模型"));
+  await p.click('[data-list="chat"]');
+  await p.waitForSelector("#ml-chat [data-pick]");
+  const table = await p.textContent("#ml-chat");
+  assert(table.includes("Vendor: Vision Model") && table.includes("輸入 3／輸出 15") && table.includes("圖片"), table.slice(0, 300));
+  assert(!table.includes("Image Gen"), "生圖模型不應出現在文字模型清單");
+  await p.fill("#ml-chat .ml-filter", "vision");
+  assert((await p.locator("#ml-chat .data-table > tbody > tr:not(.hidden)").count()) === 1, "篩選失敗");
+  await p.click('#ml-chat [data-pick="vendor/vision-model"]');
+  assert((await p.inputValue("#s-model")) === "vendor/vision-model");
+  const st = await testConnection();
+  assert(st.includes("連線成功"), st);
+  assert((await p.textContent("#ai-status")).includes("OpenRouter vendor/vision-model"), await p.textContent("#ai-status"));
+});
+await step("系統設定：語音轉文字（Groq）與圖片生成（OpenAI）從清單選用模型", async () => {
+  await go("#/settings");
+  await p.fill("[data-s=groqKey]", "gsk-test");
+  await p.fill("[data-s=openaiKey]", "sk-openai");
+  await p.selectOption("#s-speech", "groq");
+  await pickModel("speech", "whisper-1");
+  await p.selectOption("#s-image", "openai");
+  await pickModel("image", "gpt-image-1");
+  const st = await saveSettings();
+  assert(st.includes("設定已儲存"), st);
+  assert((await p.textContent('tr[data-prov="groq"] .prov-st')).includes("已設定"), "儲存後金鑰狀態應更新");
+  const s = await (await fetch(BASE + "/api/settings")).json();
+  assert(s.speechProvider === "groq" && s.speechModel === "whisper-1" && s.imageProvider === "openai" && s.imageModel === "gpt-image-1", JSON.stringify(s).slice(0, 300));
+  assert((await p.textContent("#settings-form")).includes("已設定"));
 });
 await step("系統設定：Claude 連線成功，標題列顯示模型", async () => {
-  const st = await setProvider("claude");
+  await go("#/settings");
+  await p.fill("[data-s=anthropicKey]", "sk-ant-test");
+  await p.selectOption("#s-provider", "anthropic");
+  assert(await p.isVisible("#row-effort"), "Claude 應顯示思考深度");
+  await pickModel("chat", "claude-opus-5-5");
+  const st = await testConnection();
   assert(st.includes("連線成功"), st);
   assert((await p.textContent("#ai-status")).includes("Claude Opus 5.5"), await p.textContent("#ai-status"));
   await p.screenshot({ path: path.join(SHOTS, "02-settings.png"), fullPage: true });
@@ -116,14 +162,15 @@ await step("系統設定：Claude 連線成功，標題列顯示模型", async (
 // ---------------- 檔案管理 ----------------
 await step("檔案管理：一次上傳多種格式（含掃描檔、圖片、空白檔）", async () => {
   await go("#/files");
-  const names = ["中文報告.pdf", "會議紀錄.docx", "報價單.docx", "庫存.xlsx", "成績.csv", "說明.txt", "頁面.html", "掃描檔.pdf", "截圖.png", "空白.txt"];
+  const names = ["中文報告.pdf", "會議紀錄.docx", "報價單.docx", "庫存.xlsx", "成績.csv", "說明.txt", "頁面.html", "簡報.pptx", "電子書.epub", "會議通知.eml", "掃描檔.pdf", "截圖.png", "錄音.mp3", "空白.txt"];
   await p.setInputFiles("#lib-upload", names.map(fileArg));
   await p.waitForFunction(() => /「空白\.txt」上傳(完成|失敗)/.test(document.querySelector("#lib-status")?.textContent || ""), null, { timeout: 30000 });
   const status = await p.textContent("#lib-status");
   assert(/「空白\.txt」上傳失敗：檔案是空的/.test(status), status);
   assert(/「掃描檔\.pdf」上傳完成（掃描檔／圖片，需文字辨識）/.test(status), status);
-  assert((await p.locator("#lib-table tbody tr").count()) === 9, "應有 9 個檔案");
-  assert((await p.locator("#lib-table .st-stop").count()) === 2, "掃描檔與圖片應標示需文字辨識");
+  assert((await p.locator("#lib-table tbody tr").count()) === 13, "應有 13 個檔案");
+  assert((await p.locator("#lib-table .st-stop").count()) === 3, "掃描檔、圖片、音檔應標示需處理");
+  assert((await p.textContent("#lib-table")).includes("音檔（需轉錄）"));
   await p.screenshot({ path: path.join(SHOTS, "03-files.png"), fullPage: true });
 });
 
@@ -155,6 +202,12 @@ const cases = {
   "web-translate": { fields: { url: site + "/en" }, word: true },
   "web-research": { fields: { question: "大專校院數位學習補助" }, word: true, resultHas: "參考來源" },
   "site-to-kb": { fields: { url: site + "/docs/", kb: { select: kbName }, include: "/docs/" }, expectAi: 0 },
+  transcribe: { fields: { file: { upload: "錄音.mp3" }, subtitles: true }, word: true, srt: true },
+  "meeting-audio": { fields: { file: { library: "錄音.mp3" }, title: "系務會議" }, word: true },
+  "lecture-notes": { fields: { file: { library: "錄音.mp3" }, topic: "數值方法" }, word: true },
+  "image-analysis": { fields: { file: { library: "截圖.png" }, task: { select: "解讀圖表數據" } } },
+  "image-generate": { fields: { desc: "校園林蔭大道", style: { select: "水彩手繪" }, n: "2" }, png: 2 },
+  "slides-script": { fields: { doc: { library: "簡報.pptx" }, audience: "系上老師" }, word: true },
 };
 
 async function fillField(key, v) {
@@ -208,14 +261,22 @@ for (const svc of services) {
     assert(!(await p.locator("#svc-result .st-err").count()), "有步驟失敗");
     assert(!(await p.locator("#svc-result .st-wait").count()), "有步驟停留在等待中");
     if (c.expectAi === 0) assert(world.claude.calls.length === aiBefore && st.includes("未使用 AI"), "不應呼叫 AI：" + st);
-    else if (svc.ai !== "none") assert(/AI 呼叫 \d+ 次/.test(st), "應顯示 AI 用量：" + st);
+    else if (svc.ai !== "none") assert(/AI 呼叫 \d+ 次|語音轉文字 \d+ 次|圖片生成 \d+ 張/.test(st), "應顯示 AI 用量：" + st);
+    if (svc.id === "image-generate") assert(st.includes("圖片生成 2 張"), st);
+    if (svc.id === "transcribe") assert(st.includes("語音轉文字 1 次") && !st.includes("0 tokens"), st);
     if (c.webhook) assert(world.webhook.received.length === hooks + 1, "應送出通知");
     const result = await p.evaluate(() => document.querySelector("#svc-out")?.textContent || "");
     for (const bad of ["undefined", "[object Object]", "{{", "/api/outputs/"]) assert(!result.includes(bad), `結果含「${bad}」`);
     if (c.resultHas) assert(result.includes(c.resultHas), `結果應包含「${c.resultHas}」：${result.slice(0, 200)}`);
-    const links = await p.locator("#svc-files a").evaluateAll((as) => as.map((a) => ({ href: a.getAttribute("href"), name: a.getAttribute("download") })));
+    const links = await p.locator("#svc-files table a").evaluateAll((as) => as.map((a) => ({ href: a.getAttribute("href"), name: a.getAttribute("download") })));
     if (c.word) assert(links.some((l) => l.name.endsWith(".docx")), "應產出 Word：" + JSON.stringify(links));
     if (c.xlsx) assert(links.some((l) => l.name.endsWith(".xlsx")), "應產出 Excel：" + JSON.stringify(links));
+    if (c.srt) assert(links.some((l) => l.name.endsWith(".srt")), "應產出字幕檔：" + JSON.stringify(links));
+    if (c.png) {
+      assert(links.filter((l) => l.name.endsWith(".png")).length === c.png, "應產出圖片：" + JSON.stringify(links));
+      const shown = await p.$$eval("#svc-files .gallery img", (imgs) => imgs.map((i) => i.complete && i.naturalWidth > 0));
+      assert(shown.length === c.png && shown.every(Boolean), "結果應顯示圖片預覽");
+    }
     for (const l of links) {
       const res = await fetch(BASE + l.href);
       assert(res.status === 200 && (await res.arrayBuffer()).byteLength > 0, "下載失敗：" + l.name);
