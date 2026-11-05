@@ -118,7 +118,7 @@ await step("檔案管理：一次上傳多種格式（含掃描檔、圖片、�
   await go("#/files");
   const names = ["中文報告.pdf", "會議紀錄.docx", "報價單.docx", "庫存.xlsx", "成績.csv", "說明.txt", "頁面.html", "掃描檔.pdf", "截圖.png", "空白.txt"];
   await p.setInputFiles("#lib-upload", names.map(fileArg));
-  await p.waitForFunction(() => /空白\.txt/.test(document.querySelector("#lib-status")?.textContent || ""), null, { timeout: 30000 });
+  await p.waitForFunction(() => /「空白\.txt」上傳(完成|失敗)/.test(document.querySelector("#lib-status")?.textContent || ""), null, { timeout: 30000 });
   const status = await p.textContent("#lib-status");
   assert(/「空白\.txt」上傳失敗：檔案是空的/.test(status), status);
   assert(/「掃描檔\.pdf」上傳完成（掃描檔／圖片，需文字辨識）/.test(status), status);

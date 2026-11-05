@@ -589,7 +589,8 @@ async function runNode(rawNode, vars, ctx) {
       return { __type: "table", ...t };
     }
     case "site_check": {
-      const r = await checkSite(render(node.url, vars), { signal, onStep: (s) => log(`完成：${s}`) });
+      const STEP_NAMES = { dns: "DNS 記錄", http: "連線與回應時間", security: "安全標頭", ssl: "SSL 憑證", seo: "SEO 與頁面資訊", files: "robots.txt／sitemap", links: "站內連結", score: "評分" };
+      const r = await checkSite(render(node.url, vars), { signal, onStep: (s) => log(`已檢查：${STEP_NAMES[s] || s}`) });
       log(`分數 ${r.score.score}（${r.score.grade}），${r.score.issues.length} 個問題`);
       return { __type: "check", score: r.score.score, grade: r.score.grade, issues: r.score.issues.map((i) => `【${i.level}】${i.msg}`).join("\n"), markdown: reportToMarkdown(r), host: r.host };
     }
@@ -635,7 +636,7 @@ async function runNode(rawNode, vars, ctx) {
       else if (fmt === "docx") data = await markdownToDocx(stringify(src), { formal: !!node.formal });
       else data = stringify(src);
       const f = writeOutput(`${base}.${fmt}`, data);
-      log(`已儲存 ${f.name}`);
+      log(`已儲存「${f.name.replace(/^\d+_/, "")}」`);
       emit({ type: "file", node: node.id, file: f });
       return { __type: "file", ...f };
     }

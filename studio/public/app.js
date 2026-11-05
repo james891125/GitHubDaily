@@ -91,7 +91,7 @@ const aiTag = (k) => `<span class="tag ${AI_TAG[k]?.[1] || ""}">${AI_TAG[k]?.[0]
 
 function filesTable(files) {
   if (!files?.length) return "";
-  return `<div class="table-wrap"><table class="data-table"><thead><tr><th>產出檔案</th><th>大小</th><th>下載</th></tr></thead><tbody>${files
+  return `<div class="table-wrap"><table class="data-table"><thead><tr><th>檔名</th><th>大小</th><th>下載</th></tr></thead><tbody>${files
     .map((f) => `<tr><td>${esc(cleanName(f.name))}</td><td class="num">${fmtSize(f.size)}</td><td class="nowrap"><a href="${esc(f.url)}" download="${esc(cleanName(f.name))}">下載</a></td></tr>`)
     .join("")}</tbody></table></div>`;
 }
@@ -215,7 +215,7 @@ PAGES.home = async () => {
     ${CATALOG.categories
       .map(
         (c) => `<div class="panel"><div class="panel-head"><span>${esc(c.name)}</span><span class="muted" style="font-weight:400">${esc(c.desc)}</span></div>
-        <div class="table-wrap"><table class="data-table"><thead><tr><th style="width:190px">服務項目</th><th>說明</th><th style="width:96px">AI 使用</th></tr></thead><tbody>
+        <div class="table-wrap"><table class="data-table svc-table"><thead><tr><th style="width:190px">服務項目</th><th>說明</th><th style="width:96px">AI 使用</th></tr></thead><tbody>
         ${CATALOG.services
           .filter((s) => s.cat === c.id)
           .map((s) => `<tr><td><a href="#/svc/${s.id}">${esc(s.name)}</a>${s.schedulable ? ` <span class="tag">可定期</span>` : ""}</td><td>${esc(s.desc)}</td><td>${aiTag(s.ai)}</td></tr>`)
@@ -239,7 +239,7 @@ PAGES.cat = async (id) => {
   if (!c) return PAGES.home();
   setCrumbs([[c.name]]);
   main().innerHTML = `<h2 class="page-title">${esc(c.name)}</h2><p class="page-desc">${esc(c.desc)}</p>
-    <table class="data-table"><thead><tr><th>服務項目</th><th>說明</th><th>AI 使用</th></tr></thead><tbody>
+    <table class="data-table svc-table"><thead><tr><th>服務項目</th><th>說明</th><th>AI 使用</th></tr></thead><tbody>
     ${CATALOG.services.filter((s) => s.cat === id).map((s) => `<tr><td><a href="#/svc/${s.id}">${esc(s.name)}</a></td><td>${esc(s.desc)}</td><td>${aiTag(s.ai)}</td></tr>`).join("")}
     </tbody></table>`;
 };
@@ -248,7 +248,7 @@ PAGES.cat = async (id) => {
 // 服務辦理頁
 // =====================================================================
 const AI_NOTE = {
-  none: "本服務不使用 AI，不會產生任何 API 費用。",
+  none: "本服務的主要功能不使用 AI，不會產生 API 費用；只有勾選標示「AI」的選項時才會呼叫 AI。",
   light: "本服務使用少量 AI（通常 1 次呼叫，並採用較低的思考深度以節省用量）。",
   normal: "本服務會使用 AI，長文件會分段處理；同樣內容重新辦理時會使用快取，不重複計費。",
   claude: "本服務需要使用 Claude（系統設定中的 AI 供應商須為 Anthropic Claude）。",

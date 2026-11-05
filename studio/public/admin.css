@@ -205,5 +205,15 @@ del { background: #fbdcd8; color: #8e1b10; }
   .form-table, .form-table tbody, .form-table tr, .form-table th, .form-table td { display: block; width: 100%; }
   .form-table th { border-bottom: none; }
   .sys-title span { display: none; }
+  .sys-title a { font-size: 17px; white-space: nowrap; }
+  .sys-header .inner { padding: 8px 12px; }
+  #today { display: none; }
   .data-table { font-size: 13.5px; }
+  /* 服務清單：手機上改為「名稱＋AI 標籤」一行、說明在下一行 */
+  .svc-table thead { display: none; }
+  .svc-table, .svc-table tbody { display: block; }
+  .svc-table tr { display: grid; grid-template-columns: 1fr auto; border-bottom: 1px solid var(--line); }
+  .svc-table td { border: none !important; padding: 6px 10px 0; }
+  .svc-table td:nth-child(2) { grid-column: 1 / -1; grid-row: 2; padding: 0 10px 8px; color: var(--muted); font-size: 13px; }
+  .svc-table td:nth-child(3) { grid-row: 1; grid-column: 2; }
 }
