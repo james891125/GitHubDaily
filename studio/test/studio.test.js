@@ -293,7 +293,7 @@ test("論文：有 Elsevier 金鑰時取得全文", async () => {
 });
 
 test("網頁 403：一般網站給出可行的解法說明", async () => {
-  await assert.rejects(web.scrapePage(scholarMock.url + "/blocked"), /HTTP 403：.*上傳到「📁 檔案」/);
+  await assert.rejects(web.scrapePage(scholarMock.url + "/blocked"), /HTTP 403：.*上傳到「檔案管理」/);
 });
 
 test("PDF 字型路徑：Windows 路徑轉成 pdf.js 接受的格式", () => {

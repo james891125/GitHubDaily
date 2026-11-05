@@ -143,8 +143,10 @@ function effortFor(s, req) {
  */
 export async function generate(req, onText = () => {}, signal) {
   const s = getSettings();
-  if (!llmReady(s)) throw new LLMError("尚未設定 API Key，請先到「設定」頁輸入你的金鑰。", 401);
-  const messages = req.messages || [{ role: "user", content: req.prompt }];
+  if (!llmReady(s)) throw new LLMError("尚未設定 API Key，請先到「系統設定」頁輸入你的金鑰。", 401);
+  let messages = req.messages || [{ role: "user", content: req.prompt }];
+  if (req.attachments?.length) messages = withAttachments(messages, req.attachments, s.provider);
+  if (req.webSearch && s.provider === "openai") throw new LLMError("「網路搜尋」功能需要使用 Claude（請到設定切換供應商）。", 400);
   const full = { ...req, messages };
   const days = req.noCache ? 0 : Number(s.cacheDays ?? 7);
   const key = cacheKey(s, full);
@@ -157,11 +159,35 @@ export async function generate(req, onText = () => {}, signal) {
   const r = s.provider === "openai" ? await openaiChat(s, full, onText, signal) : await claudeChat(s, full, onText, signal);
   recordUsage({ input: r.inputTokens, output: r.outputTokens, estimated: r.estimated });
   // 只有開啟快取時才寫入；被截斷的回應不快取
-  if (days && !r.truncated) writeCache(key, { text: r.text, model: r.model });
+  if (days && !r.truncated) writeCache(key, { text: r.text, model: r.model, ...(r.sources ? { sources: r.sources } : {}) });
   return r;
 }
 
-async function claudeChat(s, { system, messages, maxTokens = 32000, model, schema, ...req }, onText, signal) {
+/**
+ * 把附件（PDF、圖片）放進最後一則使用者訊息。
+ * attachments: [{ kind: "pdf" | "image", mediaType, data(base64), name }]
+ */
+function withAttachments(messages, attachments, provider) {
+  const last = messages.at(-1);
+  const text = typeof last.content === "string" ? last.content : "";
+  let content;
+  if (provider === "openai") {
+    if (attachments.some((a) => a.kind === "pdf")) throw new LLMError("直接讀取 PDF（掃描檔文字辨識）需要使用 Claude；OpenAI 相容服務請改上傳圖片。", 400);
+    content = [{ type: "text", text }, ...attachments.map((a) => ({ type: "image_url", image_url: { url: `data:${a.mediaType};base64,${a.data}` } }))];
+  } else {
+    content = [
+      ...attachments.map((a) =>
+        a.kind === "pdf"
+          ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: a.data }, ...(a.name ? { title: a.name } : {}) }
+          : { type: "image", source: { type: "base64", media_type: a.mediaType, data: a.data } },
+      ),
+      { type: "text", text },
+    ];
+  }
+  return [...messages.slice(0, -1), { ...last, content }];
+}
+
+async function claudeChat(s, { system, messages, maxTokens = 32000, model, schema, webSearch, ...req }, onText, signal) {
   const client = new Anthropic({ apiKey: s.anthropicKey });
   const m = model || s.claudeModel || "claude-opus-5-5";
   const effort = effortFor(s, req);
@@ -175,6 +201,7 @@ async function claudeChat(s, { system, messages, maxTokens = 32000, model, schem
     messages,
     ...(system ? { system } : {}),
     ...(Object.keys(output_config).length ? { output_config } : {}),
+    ...(webSearch ? { tools: [{ type: "web_search_20260209", name: "web_search", max_uses: webSearch.maxUses || 5 }] } : {}),
   };
   const useFallback = FALLBACK_MODELS.has(m);
   if (useFallback) {
@@ -182,29 +209,39 @@ async function claudeChat(s, { system, messages, maxTokens = 32000, model, schem
     params.fallbacks = "default";
   }
   let text = "";
+  const sources = [];
+  let inputTokens = 0;
+  let outputTokens = 0;
   try {
-    const stream = useFallback ? client.beta.messages.stream(params, { signal }) : client.messages.stream(params, { signal });
-    stream.on("text", (d) => {
-      text += d;
-      onText(d);
-    });
-    const final = await stream.finalMessage();
+    let final;
+    // 使用網路搜尋時，伺服器端迴圈可能以 pause_turn 暫停，需把目前內容送回讓它繼續（最多 4 次）
+    for (let round = 0; round < 5; round++) {
+      const stream = useFallback ? client.beta.messages.stream(params, { signal }) : client.messages.stream(params, { signal });
+      stream.on("text", (d) => {
+        text += d;
+        onText(d);
+      });
+      final = await stream.finalMessage();
+      const u = final.usage || {};
+      inputTokens += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+      outputTokens += u.output_tokens || 0;
+      for (const b of final.content || []) {
+        if (b.type === "web_search_tool_result" && Array.isArray(b.content)) {
+          for (const r of b.content) if (r.url && !sources.some((x) => x.url === r.url)) sources.push({ title: r.title || r.url, url: r.url });
+        }
+      }
+      if (final.stop_reason !== "pause_turn") break;
+      params.messages = [...params.messages, { role: "assistant", content: final.content }];
+    }
     if (final.stop_reason === "refusal") throw new LLMError("模型拒絕了此請求，請調整內容後重試。", 200);
     let truncated = false;
     if (final.stop_reason === "max_tokens") {
       truncated = true;
-      const note = "\n\n> ⚠️ 輸出達到長度上限而被截斷。";
+      const note = "\n\n> 注意：輸出達到長度上限而被截斷。";
       text += note;
       onText(note);
     }
-    const u = final.usage || {};
-    return {
-      text,
-      model: final.model,
-      truncated,
-      inputTokens: (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0),
-      outputTokens: u.output_tokens || 0,
-    };
+    return { text, model: final.model, truncated, inputTokens, outputTokens, ...(sources.length ? { sources } : {}) };
   } catch (e) {
     if (e instanceof LLMError) throw e;
     if (e instanceof Anthropic.AuthenticationError) throw new LLMError("Claude API Key 無效（401）。", 401);
@@ -298,7 +335,7 @@ async function openaiChat(s, { system, messages, maxTokens = 16000, model, schem
   }
   const truncated = finish === "length";
   if (truncated) {
-    const note = "\n\n> ⚠️ 輸出達到長度上限而被截斷。";
+    const note = "\n\n> 注意：輸出達到長度上限而被截斷。";
     text += note;
     onText(note);
   }
@@ -307,7 +344,7 @@ async function openaiChat(s, { system, messages, maxTokens = 16000, model, schem
     text,
     model: model || s.openaiModel,
     truncated,
-    inputTokens: usage?.prompt_tokens ?? estimateTokens(msgs.map((m) => m.content).join("\n")),
+    inputTokens: usage?.prompt_tokens ?? estimateTokens(msgs.map((m) => (typeof m.content === "string" ? m.content : (m.content || []).map((c) => c.text || "").join(" "))).join("\n")) + msgs.reduce((n, m) => n + (Array.isArray(m.content) ? m.content.filter((c) => c.type === "image_url").length * 1000 : 0), 0),
     outputTokens: usage?.completion_tokens ?? estimateTokens(text),
     estimated: !usage,
   };

@@ -89,6 +89,45 @@ export function startScholarMock() {
     if (u.pathname.startsWith("/oa/works/doi:10.9999"))
       return send(200, { title: "Closed paper", publication_year: 2020, abstract_inverted_index: { We: [0], study: [1], closed: [2], things: [3] }, open_access: { is_oa: false } });
     if (u.pathname === "/oa.pdf") return send(200, makePdf(["Open access full text body"]), "application/pdf");
+    // OpenAlex 搜尋
+    if (u.pathname === "/oa/works" && u.searchParams.get("search")) {
+      const q = u.searchParams.get("search");
+      if (q === "nothing-found") return send(200, { results: [] });
+      const n = Math.min(Number(u.searchParams.get("per-page")) || 10, 3);
+      return send(200, {
+        results: Array.from({ length: n }, (_, i) => ({
+          id: `https://openalex.org/W${i}`,
+          title: `${q} study ${i + 1}`,
+          publication_year: 2024 - i,
+          doi: `https://doi.org/10.1000/test.${i + 1}`,
+          cited_by_count: 100 - i * 10,
+          authorships: [{ author: { display_name: "C.-Y. Ku" } }, { author: { display_name: "J.-E. Xiao" } }],
+          primary_location: { source: { display_name: "Engineering Analysis with Boundary Elements" } },
+          abstract_inverted_index: { This: [0], paper: [1], studies: [2], [q.split(" ")[0]]: [3] },
+          best_oa_location: i === 0 ? { pdf_url: "https://example.org/oa.pdf" } : null,
+        })),
+      });
+    }
+    // Crossref 引用格式
+    const tm = /^\/cr\/works\/(.+)\/transform\/(.+)$/.exec(u.pathname);
+    if (tm) {
+      const doi = decodeURIComponent(tm[1]);
+      if (doi.includes("404")) return send(404, "Resource not found.", "text/plain");
+      if (tm[2] === "application/x-bibtex") return send(200, `@article{Ku_2018, title={A meshless method}, doi={${doi}}, year={2018}}`, "text/plain");
+      const style = u.searchParams.get("style");
+      return send(200, `Ku, C.-Y. (2018). A meshless method. Engineering Analysis with Boundary Elements. https://doi.org/${doi} [${style}]`, "text/plain");
+    }
+    // arXiv
+    if (u.pathname === "/arxiv/api/query") {
+      const q = (u.searchParams.get("search_query") || "").replace(/^all:/, "");
+      return send(
+        200,
+        `<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+        <entry><id>http://arxiv.org/abs/2611.00001v1</id><published>2026-11-01T00:00:00Z</published><title>New results on ${q}</title><summary>We present new results on ${q}.</summary><author><name>A. Author</name></author><link title="pdf" href="http://arxiv.org/pdf/2611.00001v1"/><arxiv:doi>10.48550/arXiv.2611.00001</arxiv:doi></entry>
+        <entry><id>http://arxiv.org/abs/2610.00002v1</id><published>2026-10-15T00:00:00Z</published><title>A survey of ${q}</title><summary>A survey.</summary><author><name>B. Author</name></author></entry></feed>`,
+        "application/atom+xml",
+      );
+    }
     send(404, { error: "nf" });
   });
   return new Promise((r) =>

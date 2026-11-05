@@ -63,6 +63,15 @@ export async function startWorldSite() {
       res.end(body);
     };
     if (p === "/robots.txt") return send(200, "User-agent: *\nAllow: /", "text/plain");
+    if (p === "/rss.xml") {
+      const d = (n) => new Date(Date.now() - n * 86400000).toUTCString();
+      return send(200, `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>教育部新聞</title>
+        <item><title>大專校院數位學習補助計畫公告</title><link>https://news.example/1</link><pubDate>${d(0)}</pubDate><description><![CDATA[<p>補助每校最高 <b>500 萬元</b>。</p>]]></description></item>
+        <item><title>新學年度招生名額核定</title><link>https://news.example/2</link><pubDate>${d(1)}</pubDate><description>核定名額共 20 萬人。</description></item>
+        <item><title>舊聞</title><link>https://news.example/3</link><pubDate>${d(30)}</pubDate><description>很久以前的消息。</description></item>
+        </channel></rss>`, "application/rss+xml");
+    }
+    if (p === "/atom.xml") return send(200, `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>期刊目次</title><entry><title>Atom 期刊新文章</title><link href="https://journal.example/a"/><updated>${new Date().toISOString()}</updated><summary>摘要內容</summary></entry></feed>`, "application/atom+xml");
     if (p === "/redirect") return send(301, "", "text/html", { location: "/about" });
     if (p === "/blocked") return send(403, "<h1>Access Denied</h1>");
     if (p === "/ratelimited") return send(429, "Too Many Requests", "text/plain");
@@ -102,8 +111,9 @@ export async function startWorldSite() {
 }
 
 // ---------------- 共用的假 AI 回覆邏輯 ----------------
-export function fakeAnswer(system, userText) {
+export function fakeAnswer(system, userText, { hasPdf = false, hasImage = false } = {}) {
   const all = `${system || ""}\n${userText}`;
+  if (hasPdf || hasImage) return { text: `（${hasPdf ? "PDF" : "圖片"}文字辨識結果）\n\n# 掃描文件\n\n本校圖書館開放時間為上午八點至晚上十點。\n\n| 項目 | 時間 |\n|---|---|\n| 平日 | 08:00-22:00 |` };
   if (all.includes("REFUSE_ME")) return { refuse: true };
   if (all.includes('{"results":')) {
     const n = (userText.match(/<item id="/g) || []).length;
@@ -155,8 +165,10 @@ export async function startFakeOpenAI() {
       return err(400, "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", { param: "max_tokens", code: "unsupported_parameter" });
     if (body.model === "legacy" && "max_completion_tokens" in body) return err(400, "Unrecognized request argument supplied: max_completion_tokens");
     const sys = body.messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
-    const user = body.messages.filter((m) => m.role !== "system").map((m) => m.content).join("\n");
-    let { text, refuse } = fakeAnswer(sys, user);
+    const flat = (c) => (typeof c === "string" ? c : (c || []).map((x) => x.text || "").join("\n"));
+    const user = body.messages.filter((m) => m.role !== "system").map((m) => flat(m.content)).join("\n");
+    const hasImage = body.messages.some((m) => Array.isArray(m.content) && m.content.some((x) => x.type === "image_url"));
+    let { text, refuse } = fakeAnswer(sys, user, { hasImage });
     if (refuse) text = "I can't help with that.";
     if (body.model === "badjson" && (user.includes('"columns"') || user.includes('{"results":'))) text = "抱歉，這是說明文字而不是 JSON";
     res.writeHead(200, { "content-type": "text/event-stream" });
@@ -185,16 +197,34 @@ export async function startFakeClaude() {
     }
     const sys = typeof body.system === "string" ? body.system : (body.system || []).map((s) => s.text).join("\n");
     const user = body.messages.map((m) => (typeof m.content === "string" ? m.content : m.content.map((c) => c.text || "").join(""))).join("\n");
-    const { text, refuse } = fakeAnswer(sys, user);
+    const blocks = body.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : []));
+    const { text, refuse } = fakeAnswer(sys, user, { hasPdf: blocks.some((b) => b.type === "document"), hasImage: blocks.some((b) => b.type === "image") });
+    const webSearch = (body.tools || []).some((t) => t.type?.startsWith("web_search"));
+    const resumed = body.messages.at(-1)?.role === "assistant";
     res.writeHead(200, { "content-type": "text/event-stream", "request-id": "req_test" });
     const ev = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
     ev("message_start", { message: { id: "msg_test", type: "message", role: "assistant", model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } });
-    if (!refuse) {
-      ev("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
-      for (const piece of text.match(/[\s\S]{1,7}/g) || []) ev("content_block_delta", { index: 0, delta: { type: "text_delta", text: piece } });
-      ev("content_block_stop", { index: 0 });
+    let idx = 0;
+    let stop = refuse ? "refusal" : "end_turn";
+    if (webSearch && !resumed) {
+      // 模擬伺服器端網路搜尋：server_tool_use + web_search_tool_result
+      ev("content_block_start", { index: idx, content_block: { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: {} } });
+      ev("content_block_delta", { index: idx, delta: { type: "input_json_delta", partial_json: '{"query":"test"}' } });
+      ev("content_block_stop", { index: idx++ });
+      ev("content_block_start", {
+        index: idx,
+        content_block: { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [{ type: "web_search_result", title: "教育部公告", url: "https://www.edu.tw/news/1", encrypted_content: "x", page_age: null }, { type: "web_search_result", title: "大學新聞", url: "https://univ.example/2", encrypted_content: "y", page_age: null }] },
+      });
+      ev("content_block_stop", { index: idx++ });
+      if (user.includes("PAUSE_ME")) stop = "pause_turn";
     }
-    ev("message_delta", { delta: { stop_reason: refuse ? "refusal" : "end_turn", stop_sequence: null }, usage: { output_tokens: 20 } });
+    if (!refuse && stop !== "pause_turn") {
+      const out = webSearch ? "## 研究報告\n\n根據教育部公告，補助每校最高 500 萬元。" : text;
+      ev("content_block_start", { index: idx, content_block: { type: "text", text: "" } });
+      for (const piece of out.match(/[\s\S]{1,7}/g) || []) ev("content_block_delta", { index: idx, delta: { type: "text_delta", text: piece } });
+      ev("content_block_stop", { index: idx });
+    }
+    ev("message_delta", { delta: { stop_reason: stop, stop_sequence: null }, usage: { output_tokens: 20 } });
     ev("message_stop", {});
     res.end();
   });

@@ -79,7 +79,7 @@ async function fetchWithTimeout(url, { timeout = 15000, method = "GET", redirect
  * mode: "article"（只取正文，Readability）或 "full"（整頁）
  */
 const BLOCKED_HINT =
-  "此網站拒絕程式直接存取（常見於需要登入、付費訂閱或有防爬蟲保護的網站）。可以：①在瀏覽器開啟後另存網頁或下載 PDF，上傳到「📁 檔案」再用「讀取檔案」節點；②若網站有官方 API，改用「呼叫 API」節點。";
+  "此網站拒絕程式直接存取（常見於需要登入、付費訂閱或有防爬蟲保護的網站）。可以：①在瀏覽器開啟後另存網頁或下載 PDF，上傳到「檔案管理」再用「讀取檔案」節點；②若網站有官方 API，改用「呼叫 API」節點。";
 
 export async function scrapePage(input, { mode = "article", signal, log = () => {} } = {}) {
   const url = normalizeUrl(input);
@@ -142,7 +142,7 @@ async function readResponse(res, url, mode) {
   }
   const page = parseHtmlPage(text, finalUrl, mode);
   if (page.markdown.replace(/[\s#*_>\-|`\[\]()!]/g, "").length < 30 && /<script/i.test(text)) {
-    throw new Error("這個網頁的內容是由 JavaScript 動態產生的，程式無法直接讀取。可以在瀏覽器開啟後按 Ctrl+S 另存網頁（或複製文字），再到「📄 文件工具」或「📁 檔案」上傳。");
+    throw new Error("這個網頁的內容是由 JavaScript 動態產生的，程式無法直接讀取。可以在瀏覽器開啟後按 Ctrl+S 另存網頁（或複製文字），再到「文件處理」或「檔案管理」上傳。");
   }
   return page;
 }
@@ -459,7 +459,7 @@ export function scoreReport(r) {
 export function reportToMarkdown(r) {
   const lines = [`# 網站檢測報告：${r.host}`, "", `- 檢測時間：${r.checkedAt}`, `- 總分：**${r.score.score} / 100（${r.score.grade}）**`, ""];
   lines.push("## 發現的問題", "");
-  if (!r.score.issues.length) lines.push("沒有發現問題 🎉");
+  if (!r.score.issues.length) lines.push("沒有發現問題 ");
   for (const i of r.score.issues) lines.push(`- 【${i.level}】${i.msg}`);
   lines.push("", "## 連線", "", `- 最終網址：${r.http.finalUrl}（HTTP ${r.http.status}）`, `- 總耗時：${r.http.totalMs} ms，大小 ${r.http.sizeKB} KB，壓縮：${r.http.compression || "無"}`, `- 伺服器：${r.http.server || "-"}`);
   if (r.http.redirects.length > 1) lines.push(`- 重新導向：${r.http.redirects.map((x) => `${x.status} ${x.url}`).join(" → ")}`);
@@ -467,7 +467,7 @@ export function reportToMarkdown(r) {
   if (r.ssl.error) lines.push(`- ${r.ssl.error}`);
   else lines.push(`- 簽發者：${r.ssl.issuer}`, `- 有效期限：${r.ssl.validTo}（剩 ${r.ssl.daysLeft} 天）`, `- 協定：${r.ssl.protocol}`, `- 受信任：${r.ssl.authorized ? "是" : "否 " + (r.ssl.authError || "")}`);
   lines.push("", "## 安全標頭", "", "| 標頭 | 狀態 | 說明 |", "|---|---|---|");
-  for (const h of r.security) lines.push(`| ${h.header} | ${h.value ? "✅" : "❌ 缺少"} | ${h.desc} |`);
+  for (const h of r.security) lines.push(`| ${h.header} | ${h.value ? "" : "缺少"} | ${h.desc} |`);
   lines.push("", "## DNS", "");
   for (const k of ["A", "AAAA", "CNAME", "MX", "NS"]) if (r.dns[k]?.length) lines.push(`- ${k}：${r.dns[k].join("、")}`);
   lines.push(`- SPF：${r.dns.spf || "無"}`, `- DMARC：${r.dns.dmarc || "無"}`);

@@ -8,17 +8,19 @@ import { scrapePage, crawlSite, checkSite, reportToMarkdown } from "./web.js";
 import { translate, summarize, extractTable, toCsv, toXlsx, toMarkdownTable, compactText, chunkLimits } from "./doctools.js";
 import { parseDocument } from "./docs.js";
 import * as kb from "./kb.js";
+import { markdownToDocx } from "./docx.js";
+import { searchPapers, papersToTable, readFeed, formatCitations, CITE_STYLES, convertChinese, ZH_MODES, compareTexts, parseTable, tableStats } from "./tools.js";
 
 // ---------- 節點定義（前端依此產生表單） ----------
 export const NODE_TYPES = {
   fetch_url: {
-    label: "🌐 擷取網頁",
+    label: "擷取網頁",
     desc: "抓取網址內容並轉成 Markdown",
     fields: { url: { label: "網址（可用變數）", type: "text", default: "{{input}}" }, mode: { label: "模式", type: "select", options: { article: "只取正文", full: "整頁" }, default: "article" } },
     out: "page",
   },
   crawl: {
-    label: "🕷️ 爬取網站",
+    label: "爬取網站",
     desc: "從起始網址爬取同網域多個頁面",
     fields: {
       url: { label: "起始網址", type: "text", default: "{{input}}" },
@@ -29,7 +31,7 @@ export const NODE_TYPES = {
     out: "site",
   },
   http: {
-    label: "🔌 呼叫 API",
+    label: "呼叫 API",
     desc: "發送 HTTP 請求到任何 API，回傳 JSON 或文字",
     fields: {
       method: { label: "方法", type: "select", options: { GET: "GET", POST: "POST", PUT: "PUT" }, default: "GET" },
@@ -40,31 +42,31 @@ export const NODE_TYPES = {
     out: "api",
   },
   read_file: {
-    label: "📄 讀取檔案",
+    label: "讀取檔案",
     desc: "讀取檔案庫中的 PDF / Word / Excel / 文字檔",
     fields: { fileId: { label: "檔案", type: "file", default: "" } },
     out: "doc",
   },
   kb_search: {
-    label: "🔎 知識庫檢索",
+    label: "知識庫檢索",
     desc: "從知識庫找出與問題最相關的段落",
     fields: { kbId: { label: "知識庫", type: "kb", default: "" }, query: { label: "查詢", type: "text", default: "{{input}}" }, k: { label: "段落數", type: "number", default: 4 } },
     out: "context",
   },
   kb_add: {
-    label: "📚 存入知識庫",
+    label: "存入知識庫",
     desc: "把文字或爬取結果加入知識庫",
     fields: { kbId: { label: "知識庫", type: "kb", default: "" }, source: { label: "內容來源變數", type: "text", default: "{{site}}" }, title: { label: "標題", type: "text", default: "{{input}}" } },
     out: "kbResult",
   },
   llm: {
-    label: "🤖 AI 處理",
+    label: "AI 處理",
     desc: "用自訂提示讓 AI 處理資料",
     fields: { prompt: { label: "提示", type: "textarea", default: "請整理以下內容的重點：\n\n{{page}}" }, system: { label: "角色設定（選填）", type: "textarea", default: "" } },
     out: "ai",
   },
   llm_each: {
-    label: "🔁 逐項 AI 處理",
+    label: "逐項 AI 處理",
     desc: "對清單中的每一項分別執行提示（例如每個網址、每一頁、每一行）",
     fields: {
       list: { label: "清單來源（變數或每行一項）", type: "text", default: "{{input}}" },
@@ -74,7 +76,7 @@ export const NODE_TYPES = {
     out: "items",
   },
   translate: {
-    label: "🌏 翻譯",
+    label: "翻譯",
     desc: "分段翻譯長文並保留格式",
     fields: {
       source: { label: "內容", type: "text", default: "{{page}}" },
@@ -83,25 +85,25 @@ export const NODE_TYPES = {
     out: "translated",
   },
   summarize: {
-    label: "📝 摘要",
+    label: "摘要",
     desc: "長文自動分段摘要",
     fields: { source: { label: "內容", type: "text", default: "{{page}}" }, style: { label: "風格", type: "text", default: "重點條列" } },
     out: "summary",
   },
   extract: {
-    label: "📊 擷取成表格",
+    label: "擷取成表格",
     desc: "從文字擷取指定欄位成表格資料",
     fields: { source: { label: "內容", type: "text", default: "{{doc}}" }, fields: { label: "欄位（逗號分隔）", type: "text", default: "名稱, 價格, 說明" }, instruction: { label: "擷取條件（選填）", type: "text", default: "" } },
     out: "table",
   },
   site_check: {
-    label: "🩺 網站檢測",
+    label: "網站檢測",
     desc: "檢查 SSL、DNS、安全標頭、SEO、失效連結並評分",
     fields: { url: { label: "網址", type: "text", default: "{{input}}" } },
     out: "check",
   },
   condition: {
-    label: "🚦 條件判斷",
+    label: "條件判斷",
     desc: "條件不成立時，停止執行後續節點",
     fields: {
       left: { label: "值", type: "text", default: "{{check.score}}" },
@@ -111,23 +113,78 @@ export const NODE_TYPES = {
     out: "",
   },
   set: {
-    label: "✏️ 組合文字",
+    label: "組合文字",
     desc: "用模板組出新的變數內容",
     fields: { value: { label: "內容", type: "textarea", default: "# 報告 {{today}}\n\n{{ai}}" } },
     out: "text",
   },
   save_file: {
-    label: "💾 輸出檔案",
+    label: "輸出檔案",
     desc: "存成 Markdown / 文字 / CSV / Excel / JSON",
     fields: {
       source: { label: "內容", type: "text", default: "{{ai}}" },
-      format: { label: "格式", type: "select", options: { md: "Markdown (.md)", txt: "文字 (.txt)", csv: "CSV", xlsx: "Excel (.xlsx)", json: "JSON" }, default: "md" },
+      format: { label: "格式", type: "select", options: { docx: "Word (.docx)", md: "Markdown (.md)", txt: "文字 (.txt)", csv: "CSV", xlsx: "Excel (.xlsx)", json: "JSON" }, default: "md" },
+      formal: { label: "Word 使用標楷體（公文等正式文件）", type: "checkbox", default: false },
       filename: { label: "檔名", type: "text", default: "報告-{{today}}" },
     },
     out: "file",
   },
+  ocr: {
+    label: "文字辨識（掃描檔／圖片）",
+    desc: "由 AI 直接閱讀掃描型 PDF 或照片，轉成文字（PDF 需使用 Claude）",
+    fields: { fileId: { label: "檔案", type: "file", default: "" }, instruction: { label: "額外要求（選填）", type: "text", default: "" } },
+    out: "doc",
+  },
+  paper_search: {
+    label: "文獻搜尋",
+    desc: "從 OpenAlex 或 arXiv 搜尋論文（免金鑰、不使用 AI）",
+    fields: {
+      query: { label: "關鍵字", type: "text", default: "{{input}}" },
+      source: { label: "資料庫", type: "select", options: { openalex: "OpenAlex（跨領域、含期刊）", arxiv: "arXiv（預印本）" }, default: "openalex" },
+      limit: { label: "篇數", type: "number", default: 10 },
+      fromYear: { label: "起始年份（選填）", type: "number", default: "" },
+      sort: { label: "排序", type: "select", options: { relevance: "相關度", date: "最新", cited: "被引用次數（僅 OpenAlex）" }, default: "relevance" },
+    },
+    out: "papers",
+  },
+  rss: {
+    label: "讀取 RSS 訂閱",
+    desc: "讀取新聞、部落格、公告的 RSS / Atom 訂閱（不使用 AI）",
+    fields: { url: { label: "訂閱網址（每行一個）", type: "textarea", default: "{{input}}" }, limit: { label: "每個來源最多幾則", type: "number", default: 10 }, sinceDays: { label: "只取最近幾天（選填）", type: "number", default: "" } },
+    out: "feed",
+  },
+  cite: {
+    label: "參考文獻格式",
+    desc: "以 DOI 查詢並產生 APA、IEEE 等格式（不使用 AI）",
+    fields: { source: { label: "DOI 清單", type: "textarea", default: "{{input}}" }, style: { label: "格式", type: "select", options: CITE_STYLES, default: "apa" } },
+    out: "citations",
+  },
+  convert_zh: {
+    label: "繁簡轉換",
+    desc: "簡體與繁體互轉，含台灣用詞（不使用 AI）",
+    fields: { source: { label: "內容", type: "text", default: "{{input}}" }, mode: { label: "轉換方式", type: "select", options: ZH_MODES, default: "s2twp" } },
+    out: "converted",
+  },
+  compare: {
+    label: "文件比對",
+    desc: "比較兩份文件的差異（不使用 AI）",
+    fields: { a: { label: "舊版內容", type: "text", default: "{{docA}}" }, b: { label: "新版內容", type: "text", default: "{{docB}}" } },
+    out: "diff",
+  },
+  table_stats: {
+    label: "資料表統計",
+    desc: "讀取 CSV / Excel 並計算平均、最大最小、類別次數（不使用 AI）",
+    fields: { fileId: { label: "資料檔", type: "file", default: "" } },
+    out: "stats",
+  },
+  web_research: {
+    label: "網路搜尋研究",
+    desc: "由 AI 上網搜尋最新資料並整理成附來源的報告（需要 Claude）",
+    fields: { prompt: { label: "研究問題", type: "textarea", default: "{{input}}" }, maxSearches: { label: "最多搜尋次數", type: "number", default: 5 } },
+    out: "research",
+  },
   webhook: {
-    label: "📣 發送通知",
+    label: "發送通知",
     desc: "POST 到 Slack / Discord / Teams 等 Webhook",
     fields: { url: { label: "Webhook 網址（空白則用設定中的預設）", type: "text", default: "" }, message: { label: "訊息", type: "textarea", default: "{{ai}}" } },
     out: "",
@@ -151,6 +208,13 @@ export function stringify(v) {
   if (v.__type === "check") return v.markdown;
   if (v.__type === "items") return v.results.map((r, i) => `## ${i + 1}. ${r.item.slice(0, 120)}\n\n${r.output}`).join("\n\n");
   if (v.__type === "file") return v.url;
+  if (v.__type === "papers")
+    return v.papers
+      .map((p, i) => `### ${i + 1}. ${p.title}\n- 作者：${p.authors.slice(0, 6).join(", ")}${p.authors.length > 6 ? " 等" : ""}\n- 年份：${p.year}　來源：${p.venue}${p.cited != null ? `　被引用：${p.cited}` : ""}\n- 連結：${p.url}${p.pdf ? `\n- 開放全文：${p.pdf}` : ""}\n\n${p.abstract ? "摘要：" + p.abstract.slice(0, 1500) : "（無摘要）"}`)
+      .join("\n\n");
+  if (v.__type === "feed") return v.items.map((i) => `- [${i.title}](${i.link})（${i.feed}${i.date ? "，" + i.date : ""}）${i.summary ? "：" + i.summary.slice(0, 200) : ""}`).join("\n");
+  if (v.__type === "diff") return v.markdown;
+  if (v.__type === "stats") return `${v.markdown}\n\n## 前 5 筆資料\n\n${v.sample}`;
   return JSON.stringify(v, null, 2);
 }
 
@@ -169,6 +233,8 @@ function toList(v) {
   if (v?.__type === "site") return v.pages.map((p) => stringify({ ...p, __type: "page" }));
   if (v?.__type === "table") return v.rows.map((r) => Object.entries(r).map(([k, x]) => `${k}：${x}`).join("\n"));
   if (v?.__type === "items") return v.results.map((r) => r.output);
+  if (v?.__type === "papers") return v.papers.map((p) => `${p.title}（${p.year}，${p.venue}）\n${p.abstract || "（無摘要）"}`);
+  if (v?.__type === "feed") return v.items.map((i) => i.link || i.title);
   return stringify(v)
     .split(/\n/)
     .map((s) => s.trim())
@@ -182,22 +248,95 @@ fs.mkdirSync(FILES_DIR, { recursive: true });
 export function listFiles() {
   return load("files-index", []);
 }
+const IMAGE_TYPES = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
+const rawPath = (meta) => path.join(FILES_DIR, meta.id + (meta.ext || ""));
+
+/**
+ * 加入檔案庫。保留原始檔（給文字辨識、資料分析使用）與擷取出的文字。
+ * 圖片與掃描型 PDF 不會被拒絕，而是標記為「需文字辨識」。
+ */
 export async function addFile(name, buf) {
   const id = newId();
-  const parsed = await parseDocument(name, buf);
-  fs.writeFileSync(path.join(FILES_DIR, id + ".txt"), parsed.text);
-  const meta = { id, name, kind: parsed.kind, pages: parsed.pages, chars: parsed.text.length, addedAt: new Date().toISOString() };
+  const ext = path.extname(name).toLowerCase();
+  let text = "";
+  let kind;
+  let pages;
+  let needsOcr = false;
+  if (IMAGE_TYPES[ext]) {
+    if (!buf?.length) throw Object.assign(new Error("檔案是空的"), { status: 422 });
+    kind = "image";
+    needsOcr = true;
+  } else {
+    try {
+      const parsed = await parseDocument(name, buf);
+      text = parsed.text;
+      kind = parsed.kind;
+      pages = parsed.pages;
+    } catch (e) {
+      if (ext === ".pdf" && /掃描|沒有可擷取/.test(e.message)) {
+        kind = "pdf";
+        needsOcr = true;
+      } else throw e;
+    }
+  }
+  fs.writeFileSync(path.join(FILES_DIR, id + ".txt"), text);
+  fs.writeFileSync(path.join(FILES_DIR, id + ext), buf);
+  const meta = { id, name, ext, kind, pages, chars: text.length, size: buf.length, needsOcr, addedAt: new Date().toISOString() };
   save("files-index", [meta, ...listFiles()]);
-  return { ...meta, text: parsed.text };
+  return { ...meta, text };
+}
+export function getFileMeta(id) {
+  const meta = listFiles().find((f) => f.id === id);
+  if (!meta) throw Object.assign(new Error(id ? "找不到檔案，可能已被刪除，請重新選擇" : "請先選擇或上傳檔案"), { status: 400 });
+  return meta;
 }
 export function getFileText(id) {
-  const meta = listFiles().find((f) => f.id === id);
-  if (!meta) throw new Error("找不到檔案，請在節點中重新選擇");
+  const meta = getFileMeta(id);
+  if (meta.needsOcr) throw Object.assign(new Error(`「${meta.name}」是掃描檔或圖片，沒有文字可讀取。請使用「掃描文件文字辨識」服務先轉成文字`), { status: 422 });
   return { meta, text: fs.readFileSync(path.join(FILES_DIR, id + ".txt"), "utf8") };
 }
+export function getFileRaw(id) {
+  const meta = getFileMeta(id);
+  const p = rawPath(meta);
+  if (!fs.existsSync(p)) throw Object.assign(new Error(`「${meta.name}」是舊版本上傳的檔案，沒有保存原始檔，請重新上傳`), { status: 422 });
+  return { meta, buf: fs.readFileSync(p) };
+}
 export function deleteFile(id) {
+  const meta = listFiles().find((f) => f.id === id);
   save("files-index", listFiles().filter((f) => f.id !== id));
   fs.rmSync(path.join(FILES_DIR, id + ".txt"), { force: true });
+  if (meta) fs.rmSync(rawPath(meta), { force: true });
+}
+
+// ---------- 服務表單 ----------
+/**
+ * 文件來源 → { __type: "doc", name, text }
+ * v：{ kind: "file", fileId } | { kind: "text", text } | { kind: "url", url } | 純文字
+ */
+export async function resolveDocSource(v, { signal } = {}) {
+  if (v && typeof v === "object" && v.kind === "file") {
+    const { meta, text } = getFileText(v.fileId);
+    return { __type: "doc", name: meta.name, text };
+  }
+  if (v && typeof v === "object" && v.kind === "url") {
+    const p = await scrapePage(v.url, { signal });
+    return { __type: "doc", name: p.title || v.url, text: `# ${p.title}\n來源：${p.url}\n\n${p.markdown}`, url: p.url };
+  }
+  const text = typeof v === "object" ? v?.text : v;
+  if (!String(text || "").trim()) throw Object.assign(new Error("請提供文件內容（上傳檔案、選擇檔案庫、貼上文字或輸入網址）"), { status: 400 });
+  return { __type: "doc", name: "貼上的文字", text: String(text) };
+}
+
+/** 依服務欄位型別整理表單值：文件來源先轉成文字、勾選轉成 true/空字串 */
+export async function prepareServiceForm(service, form = {}, { signal } = {}) {
+  const out = {};
+  for (const f of service.fields) {
+    const v = form[f.key];
+    if (f.type === "doc") out[f.key] = v ? await resolveDocSource(v, { signal }) : undefined;
+    else if (f.type === "checkbox") out[f.key] = v === true || v === "true" || v === "on" ? "true" : "";
+    else out[f.key] = v == null ? (f.default ?? "") : String(v).trim();
+  }
+  return out;
 }
 
 // ---------- 執行 ----------
@@ -212,7 +351,24 @@ function parseHeaders(text, vars) {
   return h;
 }
 
-async function runNode(node, vars, ctx) {
+/** 數字、選單、勾選、檔案、知識庫欄位若使用 {{變數}}，執行前先代入實際值 */
+function renderConfig(node, vars) {
+  const def = NODE_TYPES[node.type];
+  if (!def) return node;
+  const out = { ...node };
+  for (const [k, f] of Object.entries(def.fields)) {
+    const v = node[k];
+    if (typeof v !== "string" || !v.includes("{{")) continue;
+    if (["number", "select", "checkbox", "file", "kb"].includes(f.type)) {
+      const r = render(v, vars).trim();
+      out[k] = f.type === "number" ? (r === "" ? "" : Number(r)) : f.type === "checkbox" ? !/^(|false|0|no|off)$/i.test(r) : r;
+    }
+  }
+  return out;
+}
+
+async function runNode(rawNode, vars, ctx) {
+  const node = renderConfig(rawNode, vars);
   const { emit, signal, flow } = ctx;
   const log = (m) => emit({ type: "log", node: node.id, message: m });
   const onText = (d) => emit({ type: "text", node: node.id, delta: d });
@@ -231,9 +387,9 @@ async function runNode(node, vars, ctx) {
       const r = await crawlSite(url, {
         maxPages: Number(node.maxPages) || 10,
         maxDepth: Number(node.maxDepth) || 2,
-        include: node.include || "",
+        include: render(node.include || "", vars).trim(),
         signal,
-        onPage: (p, s) => log(p ? `✓ ${p.url}（${s.done}）` : `✗ ${s.error}`),
+        onPage: (p, s) => log(p ? `完成 ${p.url}（第 ${s.done} 頁）` : `失敗 ${s.error}`),
       });
       return { __type: "site", start: url, pages: r.pages.map((p) => ({ url: p.url, title: p.title, markdown: p.markdown })), errors: r.errors };
     }
@@ -254,13 +410,86 @@ async function runNode(node, vars, ctx) {
         return text;
       }
     }
+    case "ocr": {
+      const { meta, buf } = getFileRaw(render(node.fileId, vars));
+      const isPdf = meta.ext === ".pdf";
+      const mediaType = isPdf ? "application/pdf" : IMAGE_TYPES[meta.ext];
+      if (!mediaType) throw Object.assign(new Error("文字辨識支援 PDF 與圖片（PNG、JPG、WEBP、GIF）"), { status: 422 });
+      if (buf.length > 25 * 1024 * 1024) throw Object.assign(new Error("檔案超過 25 MB，請先分割後再辨識"), { status: 422 });
+      log(`辨識「${meta.name}」中…（${isPdf ? "PDF" : "圖片"}，${Math.round(buf.length / 1024)} KB）`);
+      const { text } = await generate(
+        {
+          prompt: `請將這份${isPdf ? "文件" : "圖片"}中的所有文字完整轉錄成文字，保留原本的段落、標題與表格（表格請用 Markdown 表格）。不要摘要、不要省略、不要加入說明。${render(node.instruction || "", vars)}`,
+          attachments: [{ kind: isPdf ? "pdf" : "image", mediaType, data: buf.toString("base64"), name: meta.name }],
+          maxTokens: 64000,
+          light: true,
+        },
+        onText,
+        signal,
+      );
+      return { __type: "doc", name: meta.name, text };
+    }
+    case "paper_search": {
+      const papers = await searchPapers(render(node.query, vars), { source: node.source, limit: node.limit, fromYear: render(String(node.fromYear ?? ""), vars), sort: node.sort, signal });
+      log(`找到 ${papers.length} 篇（${node.source === "arxiv" ? "arXiv" : "OpenAlex"}）`);
+      return { __type: "papers", papers };
+    }
+    case "rss": {
+      const urls = render(node.url, vars).split(/\s+/).filter((u) => /^https?:\/\//.test(u));
+      if (!urls.length) throw Object.assign(new Error("請輸入 RSS 訂閱網址"), { status: 400 });
+      const items = [];
+      for (const u of urls) {
+        try {
+          const list = await readFeed(u, { limit: node.limit, sinceDays: node.sinceDays, signal });
+          items.push(...list.map((i) => ({ ...i, feed: new URL(u).hostname })));
+          log(`${u}：${list.length} 則`);
+        } catch (e) {
+          log(`${u}：讀取失敗（${e.message}）`);
+        }
+      }
+      if (!items.length) throw Object.assign(new Error("所有訂閱來源都沒有讀到內容"), { status: 502 });
+      return { __type: "feed", items };
+    }
+    case "cite": {
+      const list = await formatCitations(render(node.source, vars), { style: node.style, signal });
+      const ok = list.filter((c) => c.citation);
+      log(`完成 ${ok.length}/${list.length} 筆${list.length > ok.length ? `，${list.length - ok.length} 筆查詢失敗` : ""}`);
+      return list.map((c) => c.citation || `（${c.doi}：${c.error}）`).join(node.style === "bibtex" ? "\n\n" : "\n\n");
+    }
+    case "convert_zh":
+      return convertChinese(stringify(resolveRaw(node.source, vars)), node.mode);
+    case "compare": {
+      const d = compareTexts(stringify(resolveRaw(node.a, vars)), stringify(resolveRaw(node.b, vars)));
+      log(`新增 ${d.added} 字、刪除 ${d.removed} 字，共 ${d.changes.length} 處變動`);
+      return { __type: "diff", ...d };
+    }
+    case "table_stats": {
+      const { meta, buf } = getFileRaw(render(node.fileId, vars));
+      const table = await parseTable(meta.name, buf);
+      const st = tableStats(table);
+      log(`${table.rows.length} 筆資料、${table.columns.length} 個欄位`);
+      return { __type: "stats", markdown: st.markdown, rowCount: st.rowCount, sample: toMarkdownTable({ columns: table.columns, rows: table.rows.slice(0, 5) }) };
+    }
+    case "web_research": {
+      const r = await generate(
+        {
+          system: "你是嚴謹的研究助理。請使用網路搜尋找出可靠、最新的資料，使用繁體中文撰寫，並在每個重點後標註來源。",
+          prompt: render(node.prompt, vars),
+          webSearch: { maxUses: Math.min(Number(node.maxSearches) || 5, 10) },
+        },
+        onText,
+        signal,
+      );
+      const refs = (r.sources || []).map((x, i) => `${i + 1}. [${x.title}](${x.url})`).join("\n");
+      return r.text + (refs ? `\n\n## 參考來源\n\n${refs}` : "");
+    }
     case "read_file": {
-      const { meta, text } = getFileText(node.fileId);
+      const { meta, text } = getFileText(render(node.fileId, vars));
       log(`讀取「${meta.name}」，${text.length} 字`);
       return { __type: "doc", name: meta.name, text };
     }
     case "kb_search": {
-      const k = kb.getKb(node.kbId);
+      const k = kb.getKb(render(node.kbId, vars));
       const hits = kb.search(k, render(node.query, vars), Number(node.k) || 6);
       log(`找到 ${hits.length} 段相關內容`);
       return hits.map((h, i) => `[${i + 1}] 《${h.title}》\n${h.text}`).join("\n\n---\n\n") || "（知識庫中沒有找到相關內容）";
@@ -270,18 +499,18 @@ async function runNode(node, vars, ctx) {
       let added = 0;
       if (src?.__type === "site") {
         for (const p of src.pages) {
-          kb.addDocument(node.kbId, { title: p.title || p.url, text: p.markdown, source: p.url, kind: "web" });
+          kb.addDocument(render(node.kbId, vars), { title: p.title || p.url, text: p.markdown, source: p.url, kind: "web" });
           added++;
         }
       } else {
-        kb.addDocument(node.kbId, { title: render(node.title, vars) || "工作流內容", text: stringify(src), source: src?.url || "", kind: src?.__type || "text" });
+        kb.addDocument(render(node.kbId, vars), { title: render(node.title, vars) || "工作流內容", text: stringify(src), source: src?.url || "", kind: src?.__type || "text" });
         added = 1;
       }
       log(`已存入 ${added} 份文件`);
       return { added };
     }
     case "llm": {
-      const { text } = await generate({ prompt: render(node.prompt, vars), system: render(node.system || "", vars) || "請使用繁體中文回答，以 Markdown 格式輸出。" }, onText, signal);
+      const { text } = await generate({ prompt: render(node.prompt, vars), system: render(node.system || "", vars) || "請使用繁體中文回答，以 Markdown 格式輸出。", light: !!node.light }, onText, signal);
       return text;
     }
     case "llm_each": {
@@ -299,7 +528,7 @@ async function runNode(node, vars, ctx) {
             content = `# ${p.title}\n來源：${p.url}\n\n${compactText(p.markdown).slice(0, 30000)}`;
           } catch (e) {
             results[i] = { item, output: `（擷取失敗：${e.message}）` };
-            log(`✗ ${i + 1}/${list.length} ${e.message}`);
+            log(`失敗 ${i + 1}/${list.length}：${e.message}`);
             continue;
           }
         }
@@ -346,12 +575,12 @@ async function runNode(node, vars, ctx) {
           }
         }
         batch.forEach((it, k) => (results[it.i] = { item: it.item, output: outputs[k] }));
-        log(`✓ 已完成 ${results.filter(Boolean).length}/${list.length}（本批 ${batch.length} 項，1 次呼叫）`);
+        log(`完成 ${results.filter(Boolean).length}/${list.length}（本批 ${batch.length} 項，1 次呼叫）`);
       }
       return { __type: "items", results: results.filter(Boolean) };
     }
     case "translate":
-      return translate(stringify(resolveRaw(node.source, vars)), { target: node.target, onText, onProgress: progress, signal });
+      return translate(stringify(resolveRaw(node.source, vars)), { target: node.target, glossary: render(node.glossary || "", vars), onText, onProgress: progress, signal });
     case "summarize":
       return summarize(stringify(resolveRaw(node.source, vars)), { style: render(node.style, vars), onText, onProgress: progress, signal });
     case "extract": {
@@ -399,10 +628,11 @@ async function runNode(node, vars, ctx) {
       const base = render(node.filename || "output", vars);
       let data;
       if (fmt === "csv" || fmt === "xlsx") {
-        const table = src?.__type === "table" ? src : Array.isArray(src) && src.length && typeof src[0] === "object" ? { columns: Object.keys(src[0]), rows: src } : null;
+        const table = src?.__type === "papers" ? papersToTable(src.papers) : src?.__type === "table" ? src : Array.isArray(src) && src.length && typeof src[0] === "object" ? { columns: Object.keys(src[0]), rows: src } : null;
         if (!table) throw new Error("CSV / Excel 需要表格資料（例如「擷取成表格」節點的輸出）");
         data = fmt === "csv" ? toCsv(table) : await toXlsx(table);
-      } else if (fmt === "json") data = JSON.stringify(src, null, 2);
+      } else if (fmt === "json") data = JSON.stringify(src?.__type === "papers" ? src.papers : src, null, 2);
+      else if (fmt === "docx") data = await markdownToDocx(stringify(src), { formal: !!node.formal });
       else data = stringify(src);
       const f = writeOutput(`${base}.${fmt}`, data);
       log(`已儲存 ${f.name}`);
@@ -441,9 +671,10 @@ export async function runFlow(flow, opts = {}) {
   return result;
 }
 
-async function runFlowInner(flow, { input = "", emit = () => {}, signal, settings = {}, trigger = "manual" } = {}) {
+async function runFlowInner(flow, { input = "", emit = () => {}, signal, settings = {}, trigger = "manual", vars: extra = {} } = {}) {
   const now = new Date();
   const vars = {
+    ...extra,
     input,
     today: now.toLocaleDateString("sv-SE"),
     now: now.toLocaleString("zh-TW", { hour12: false }),
@@ -459,6 +690,11 @@ async function runFlowInner(flow, { input = "", emit = () => {}, signal, setting
   try {
     for (const [i, node] of (flow.nodes || []).entries()) {
       if (node.disabled) continue;
+      // 條件式節點：when 的值為空、false、0、no 時略過（用於「勾選才執行」的選項）
+      if (node.when !== undefined && /^(|false|0|no|off|undefined)$/i.test(render(node.when, vars).trim())) {
+        record({ type: "node-skip", node: node.id, index: i });
+        continue;
+      }
       if (signal?.aborted) throw new Error("已取消");
       record({ type: "node-start", node: node.id, index: i, label: node.title || NODE_TYPES[node.type]?.label });
       try {
@@ -542,7 +778,11 @@ export function startScheduler(getSettingsFn, log = console.log) {
       running.add(flow.id);
       saveFlow({ ...flow, lastScheduledRun: new Date().toISOString() });
       log(`[排程] 執行「${flow.name}」`);
-      runFlow(flow, { input: flow.schedule.input || "", settings: getSettingsFn(), trigger: "schedule" })
+      (async () => {
+        const vars = flow.serviceForm ? { form: await prepareServiceForm({ fields: flow.serviceFields || [] }, flow.serviceForm) } : {};
+        return runFlow(flow, { input: flow.schedule.input || "", settings: getSettingsFn(), trigger: "schedule", vars });
+      })()
+        .catch((e) => ({ status: "error", error: e.message }))
         .then((r) => log(`[排程] 「${flow.name}」${r.status}${r.error ? "：" + r.error : ""}`))
         .finally(() => running.delete(flow.id));
     }
@@ -555,7 +795,7 @@ export function startScheduler(getSettingsFn, log = console.log) {
 // ---------- 範本 ----------
 export const TEMPLATES = [
   {
-    name: "🌏 外文文章 → 繁中翻譯 + 摘要",
+    name: "外文文章 → 繁中翻譯 + 摘要",
     description: "貼上英文（或任何語言）文章網址，自動擷取正文、翻成繁體中文、產生摘要，存成 Markdown 檔。",
     inputLabel: "文章網址",
     inputPlaceholder: "https://example.com/blog/post",
@@ -568,8 +808,8 @@ export const TEMPLATES = [
     ],
   },
   {
-    name: "📑 論文 PDF → 繁中翻譯 + 摘要",
-    description: "適用於需要訂閱、無法直接擷取的期刊論文：先在瀏覽器下載 PDF，上傳到「📁 檔案」，在第 1 個節點選擇檔案後執行。",
+    name: "論文 PDF → 繁中翻譯 + 摘要",
+    description: "適用於需要訂閱、無法直接擷取的期刊論文：先在瀏覽器下載 PDF，上傳到「檔案管理」，在第 1 個節點選擇檔案後執行。",
     inputLabel: "摘要重點（選填）",
     inputPlaceholder: "例如：著重研究方法與數值結果",
     nodes: [
@@ -581,7 +821,7 @@ export const TEMPLATES = [
     ],
   },
   {
-    name: "📰 多網址每日簡報",
+    name: "多網址每日簡報",
     description: "每行一個網址（新聞、部落格、公告頁），逐一擷取並摘要，最後整合成一份簡報並推送到 Slack / Discord。可設定每天自動執行。",
     inputLabel: "網址清單（每行一個）",
     inputPlaceholder: "https://news.example.com/a\nhttps://blog.example.com/b",
@@ -593,7 +833,7 @@ export const TEMPLATES = [
     ],
   },
   {
-    name: "🩺 網站健康巡檢 + 異常通知",
+    name: "網站健康巡檢 + 異常通知",
     description: "檢測網站的 SSL、安全標頭、SEO、失效連結。分數低於門檻時，由 AI 寫出修正建議並發送通知。適合設成每天自動執行。",
     inputLabel: "網站網址",
     inputPlaceholder: "https://your-site.com",
@@ -602,11 +842,11 @@ export const TEMPLATES = [
       { id: "n2", type: "save_file", source: "{{check}}", format: "md", filename: "網站檢測-{{check.host}}-{{today}}", out: "file" },
       { id: "n3", type: "condition", left: "{{check.score}}", op: "lt", right: "85" },
       { id: "n4", type: "llm", prompt: "以下是網站檢測報告。請以繁體中文列出最該優先處理的 5 個問題，每個問題附上具體修正方法（例如 Nginx / Apache / Cloudflare 的設定範例）。\n\n{{check}}", out: "ai" },
-      { id: "n5", type: "webhook", url: "", message: "⚠️ {{check.host}} 檢測分數 {{check.score}}（{{check.grade}}）\n\n{{check.issues}}", disabled: true },
+      { id: "n5", type: "webhook", url: "", message: "{{check.host}} 檢測分數 {{check.score}}（{{check.grade}}）\n\n{{check.issues}}", disabled: true },
     ],
   },
   {
-    name: "🔔 網頁變動監控",
+    name: "網頁變動監控",
     description: "定時檢查某個網頁（價格、公告、職缺頁…），內容有變動時由 AI 說明改了什麼並通知你。",
     inputLabel: "要監控的網址",
     inputPlaceholder: "https://example.com/pricing",
@@ -615,11 +855,11 @@ export const TEMPLATES = [
       { id: "n2", type: "set", value: "{{page.markdown}}", out: "text" },
       { id: "n3", type: "condition", left: "{{text}}", op: "changed", right: "" },
       { id: "n4", type: "llm", prompt: "網頁 {{page.url}} 的內容有更新。請用繁體中文簡短說明目前頁面的重點內容，特別是價格、日期、數字等資訊：\n\n{{text}}", out: "ai" },
-      { id: "n5", type: "webhook", url: "", message: "🔔 網頁有變動：{{page.url}}\n\n{{ai}}", disabled: true },
+      { id: "n5", type: "webhook", url: "", message: "網頁有變動：{{page.url}}\n\n{{ai}}", disabled: true },
     ],
   },
   {
-    name: "📊 文件 → Excel 表格",
+    name: "文件 → Excel 表格",
     description: "從上傳的 PDF / Word（報價單、型錄、報告、名單…）擷取指定欄位，輸出 Excel。",
     inputLabel: "擷取條件（選填）",
     inputPlaceholder: "例如：只要 2024 年以後的項目",
@@ -630,7 +870,7 @@ export const TEMPLATES = [
     ],
   },
   {
-    name: "📚 網站 → 知識庫",
+    name: "網站 → 知識庫",
     description: "爬取整個網站（例如產品說明文件、FAQ），自動存進知識庫，之後就能在「知識庫問答」直接提問。",
     inputLabel: "網站起始網址",
     inputPlaceholder: "https://docs.example.com/",
@@ -640,7 +880,7 @@ export const TEMPLATES = [
     ],
   },
   {
-    name: "🔌 API 資料 → AI 分析報告",
+    name: "API 資料 → AI 分析報告",
     description: "呼叫任何 JSON API（此範例為 GitHub 公開 API），由 AI 解讀資料並產生報告。可換成你自己的內部 API。",
     inputLabel: "GitHub 專案（owner/repo）",
     inputPlaceholder: "nodejs/node",

@@ -148,7 +148,7 @@ for (const providerName of Object.keys(PROVIDERS)) {
       const r = await runTemplate(await tplIndex("每日簡報"), { input, patch: setNode("webhook", { disabled: false }) });
       assert.equal(r.status, "success", r.error?.message);
       const logs = r.events.filter((e) => e.type === "log").map((e) => e.message).join("\n");
-      assert.match(logs, /✗ 3\/3 HTTP 403/);
+      assert.match(logs, /失敗 3\/3：HTTP 403/);
       assert.equal(world.webhook.received.length, before + 1);
       const msg = world.webhook.received.at(-1);
       assert.ok(msg.text && msg.content, "Webhook 需同時有 Slack(text) 與 Discord(content) 欄位");
@@ -272,8 +272,10 @@ describe("文件工具 × 各種檔案", () => {
       assert.match(dl, re);
     });
   }
-  test("掃描型 PDF：清楚說明不支援 OCR", async () => {
-    await assert.rejects(upload("掃描檔.pdf"), /掃描|OCR/);
+  test("掃描型 PDF：可以上傳但標記為需文字辨識；直接轉文字時提示改用文字辨識服務", async () => {
+    const f = await upload("掃描檔.pdf");
+    assert.equal(f.needsOcr, true);
+    await assert.rejects(api("/api/doc/convert", { fileId: f.id }), /掃描文件文字辨識/);
   });
   test("損毀的檔案（副檔名是 .docx 但內容不是）：清楚的錯誤，且不是伺服器錯誤 500", async () => {
     const res = await fetch(BASE + "/api/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "壞掉.docx", data: Buffer.from("這不是 Word 檔").toString("base64") }) });

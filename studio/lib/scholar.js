@@ -161,7 +161,7 @@ export async function fetchPaper(url, { log = () => {}, signal } = {}) {
     body = `## Abstract\n\n${paper.abstract || "（未取得摘要）"}`;
     head.push(
       "",
-      "> ⚠️ 只取得摘要，無法取得全文。若要處理全文：在設定頁填入 Elsevier API Key 並在學校／機構網路下執行，或從瀏覽器下載 PDF 後上傳到「📁 檔案」，改用「讀取檔案」節點。",
+      "> 只取得摘要，無法取得全文。若要處理全文：在設定頁填入 Elsevier API Key 並在學校／機構網路下執行，或從瀏覽器下載 PDF 後上傳到「檔案管理」，改用「讀取檔案」節點。",
     );
   }
   return {

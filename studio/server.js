@@ -11,6 +11,7 @@ import { writeOutput } from "./lib/store.js";
 import { scrapePage, crawlSite, checkSite, reportToMarkdown } from "./lib/web.js";
 import * as kb from "./lib/kb.js";
 import * as flow from "./lib/flow.js";
+import { CATEGORIES, SERVICES, getService, validateForm } from "./lib/services.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(here, "public");
@@ -253,9 +254,41 @@ const routes = {
       const b = await body(req);
       const f = b.flow || flow.getFlow(b.id);
       if (!f) throw new Error("找不到工作流");
-      await flow.runFlow(f, { input: b.input || "", emit: send, signal, settings: getSettings() });
+      const vars = f.serviceForm ? { form: await flow.prepareServiceForm({ fields: f.serviceFields || [] }, f.serviceForm, { signal }) } : {};
+      await flow.runFlow(f, { input: b.input || "", emit: send, signal, settings: getSettings(), vars });
     }),
   "GET /api/runs": (req, res) => json(res, 200, load("runs", [])),
+
+  // ---- 服務目錄 ----
+  "GET /api/services": (req, res) => json(res, 200, { categories: CATEGORIES, services: SERVICES }),
+  "POST /api/services/run": (req, res) =>
+    streamTask(req, res, async ({ send, signal }) => {
+      const b = await body(req);
+      const svc = getService(b.id);
+      const errors = validateForm(svc, b.form);
+      if (errors.length) throw Object.assign(new Error(errors.join("；")), { status: 400 });
+      send({ type: "log", node: "_prepare", message: "準備資料中…" });
+      const form = await flow.prepareServiceForm(svc, b.form, { signal });
+      await flow.runFlow({ id: "svc-" + svc.id, name: svc.name, nodes: svc.nodes }, { emit: send, signal, settings: getSettings(), vars: { form } });
+    }),
+  "POST /api/services/schedule": async (req, res) => {
+    const b = await body(req);
+    const svc = getService(b.id);
+    if (!svc.schedulable) throw Object.assign(new Error("此服務不支援定期執行"), { status: 400 });
+    const errors = validateForm(svc, b.form);
+    if (errors.length) throw Object.assign(new Error(errors.join("；")), { status: 400 });
+    for (const f of svc.fields) if (f.type === "doc" && b.form?.[f.key]?.kind === "text") throw Object.assign(new Error("定期執行的文件來源請使用網址或檔案庫"), { status: 400 });
+    const saved = flow.saveFlow({
+      name: `${svc.name}（定期）`,
+      description: svc.desc,
+      serviceId: svc.id,
+      serviceFields: svc.fields,
+      serviceForm: b.form,
+      nodes: svc.nodes,
+      schedule: { enabled: true, mode: b.schedule?.mode === "interval" ? "interval" : "daily", time: b.schedule?.time || "08:00", minutes: Number(b.schedule?.minutes) || 60, input: "" },
+    });
+    json(res, 200, saved);
+  },
 };
 
 const server = http.createServer(async (req, res) => {
@@ -296,8 +329,8 @@ export { server };
 const sameFile = (a, b) => (process.platform === "win32" ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
 if (process.argv[1] && sameFile(process.argv[1], fileURLToPath(import.meta.url))) {
   server.listen(PORT, HOST, () => {
-    console.log(`\n  🧪 AI 工作坊已啟動：http://${HOST}:${PORT}\n`);
-    if (!llmReady()) console.log("  尚未設定 API Key —— 請在網頁的「設定」頁輸入。\n");
+    console.log(`\n  AI 工作坊已啟動：http://${HOST}:${PORT}\n`);
+    if (!llmReady()) console.log("  尚未設定 API Key —— 請在網頁的「系統設定」頁輸入。\n");
   });
   flow.startScheduler(getSettings);
 }
