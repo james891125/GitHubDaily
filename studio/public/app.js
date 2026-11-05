@@ -45,7 +45,7 @@ async function streamPost(path, data, onEvent, signal) {
       buf = buf.slice(i + 1);
       if (!line.trim()) continue;
       const ev = JSON.parse(line);
-      if (ev.type === "error") err = ev.message;
+      if (ev.type === "error" && ev.item === undefined) err = ev.message; // 批次中單一檔案的錯誤不中斷整批
       else onEvent(ev);
     }
   }
@@ -189,6 +189,7 @@ async function route() {
   const page = parts[0] || "home";
   const r = [page, parts[1] ? decodeURIComponent(parts[1]) : undefined];
   document.body.classList.remove("menu-open");
+  delete document.body.dataset.route;
   renderSidebar(r);
   const fn = PAGES[page] || PAGES.home;
   try {
@@ -197,6 +198,8 @@ async function route() {
     main().innerHTML = `<div class="alert">頁面載入失敗：${esc(e.message)}</div>`;
   }
   window.scrollTo(0, 0);
+  // 標記目前已完成繪製的頁面（自動化測試等待用）
+  document.body.dataset.route = location.hash || "#/";
 }
 window.addEventListener("hashchange", route);
 // 文件來源、檔案欄位的切換（上傳／檔案庫／貼上文字／網址）
@@ -277,6 +280,8 @@ const AI_NOTE = {
   imagegen: "本服務需要「圖片生成」服務（系統設定 → 圖片生成），依各服務的計價方式按張計費。",
 };
 
+const DOC_ACCEPT = ".pdf,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.odt,.ods,.odp,.rtf,.epub,.eml,.csv,.tsv,.txt,.md,.html,.htm,.json,.xml,.srt,.vtt";
+
 function fieldHtml(f) {
   const id = `f-${f.key}`;
   const req = f.required ? `<span class="req">*</span>` : "";
@@ -325,7 +330,7 @@ function fieldHtml(f) {
         <label class="inline"><input type="radio" name="${f.key}-mode" value="library" />檔案庫</label>
         <label class="inline"><input type="radio" name="${f.key}-mode" value="text" />貼上文字</label>
         <label class="inline"><input type="radio" name="${f.key}-mode" value="url" />網址</label>
-        <div class="src-pane" data-pane="upload"><input type="file" id="${id}" accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.odt,.ods,.odp,.rtf,.epub,.eml,.csv,.tsv,.txt,.md,.html,.htm,.json,.xml,.srt,.vtt" /></div>
+        <div class="src-pane" data-pane="upload"><input type="file" id="${id}" accept="${DOC_ACCEPT}" /></div>
         <div class="src-pane hidden" data-pane="library"><select id="${id}-lib"><option value="">請選擇</option>${FILES.filter((x) => !x.needsOcr).map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join("")}</select></div>
         <div class="src-pane hidden" data-pane="text"><textarea id="${id}-text" rows="6"></textarea></div>
         <div class="src-pane hidden" data-pane="url"><input type="url" id="${id}-url" placeholder="https://" /></div>
@@ -432,7 +437,7 @@ PAGES.svc = async (id) => {
     <div class="notice"><b>注意事項</b><ol>${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ol></div>
     <form id="svc-form" class="panel" novalidate>
       <div class="panel-head">申請資料<span class="muted" style="font-weight:400"><span style="color:var(--red)">*</span> 為必填欄位</span></div>
-      <table class="form-table"><tbody>${svc.fields.map(fieldHtml).join("")}</tbody></table>
+      <table class="form-table"><tbody>${batchRows(svc)}${svc.fields.map(fieldHtml).join("")}</tbody></table>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary" id="svc-submit">送出</button>
         <button type="reset" class="btn">清除重填</button>
@@ -453,7 +458,15 @@ PAGES.svc = async (id) => {
   const form = $("#svc-form");
   form.addEventListener("submit", (e) => {
     e.preventDefault();
-    runService(svc);
+    if ($("#batch-mode")?.checked) runBatch(svc);
+    else runService(svc);
+  });
+  $("#batch-mode")?.addEventListener("change", (e) => {
+    const on = e.target.checked;
+    $("#batch-row").classList.toggle("hidden", !on);
+    const single = $(`#f-${svc.batchField}`)?.closest("tr");
+    single?.classList.toggle("hidden", on);
+    $("#svc-schedule-btn")?.classList.toggle("hidden", on);
   });
   $("#svc-stop").addEventListener("click", () => currentAbort?.abort());
   $("#svc-schedule-btn")?.addEventListener("click", () => $("#svc-schedule").classList.toggle("hidden"));
@@ -468,6 +481,87 @@ PAGES.svc = async (id) => {
     }
   });
 };
+
+/** 批次辦理：可批次的服務在表單最上方提供切換，選擇多個檔案後逐一辦理 */
+function batchRows(svc) {
+  if (!svc.batchField) return "";
+  const f = svc.fields.find((x) => x.key === svc.batchField);
+  return `<tr><th><label for="batch-mode">辦理方式</label></th><td><label class="inline"><input type="checkbox" id="batch-mode" />批次辦理：同樣的設定，一次處理多個檔案</label><div class="help">每個檔案分別辦理，完成後所有產出打包成一個 ZIP（最多 100 個檔案）。</div></td></tr>
+    <tr id="batch-row" class="hidden">${fieldHtml({ key: "__batch", label: `${f.label}（多個檔案）`, type: "files", required: true, accept: f.type === "doc" ? DOC_ACCEPT : f.accept || "" }).replace(/^<tr>|<\/tr>$/g, "")}</tr>`;
+}
+
+async function runBatch(svc) {
+  if (svc.ai === "speech" || svc.ai === "imagegen" ? needKey(svc.name, svc.ai) : svc.ai !== "none" && needKey(svc.name)) return;
+  const box = $("#svc-result");
+  const status = (t) => ($("#svc-status") ? ($("#svc-status").textContent = t) : null);
+  box.innerHTML = `<div class="panel"><div class="panel-head"><span>批次辦理進度</span><span id="svc-status" class="muted" style="font-weight:400"></span></div>
+    <div class="table-wrap"><table class="data-table" id="batch-table"><thead><tr><th style="width:48px">#</th><th>檔案</th><th style="width:90px">狀態</th><th>說明</th></tr></thead><tbody></tbody></table></div></div>
+    <div class="panel hidden" id="svc-files-panel"><div class="panel-head">產出檔案</div><div id="svc-files"></div></div>
+    <div class="panel hidden" id="svc-out-panel"><div class="panel-head"><span>辦理結果</span></div><div class="panel-body"><div class="result" id="svc-out"></div></div></div>`;
+  const submit = $("#svc-submit");
+  submit.disabled = true;
+  $("#svc-stop").classList.remove("hidden");
+  currentAbort = new AbortController();
+  const t0 = Date.now();
+  let usage = null;
+  let final = null;
+  const row = (i) => $(`#batch-table tr[data-item="${i}"]`);
+  try {
+    status("資料處理中…");
+    const bbox = $('[data-filesfield="__batch"]');
+    const items = filesState.get(bbox) || [];
+    if (!items.length) throw new Error(`請選擇要批次處理的檔案`);
+    const ids = [];
+    for (const [i, it] of items.entries()) {
+      if (!it.id) {
+        status(`上傳「${it.name}」中…（${i + 1}/${items.length}）`);
+        const saved = await uploadFile(it.file);
+        it.id = saved.id;
+        delete it.file;
+      }
+      ids.push(it.id);
+    }
+    renderFilesList(bbox);
+    const form = await collectForm({ ...svc, fields: svc.fields.filter((f) => f.key !== svc.batchField) }, status);
+    $("#batch-table tbody").innerHTML = items.map((it, i) => `<tr data-item="${i}"><td class="num">${i + 1}</td><td>${esc(it.name)}</td><td><span class="st st-wait">等待中</span></td><td><div class="steplog"></div></td></tr>`).join("");
+    status("辦理中…");
+    await streamPost(
+      "/api/services/batch",
+      { id: svc.id, form, files: ids },
+      (ev) => {
+        if (ev.type === "item-start") {
+          row(ev.item).children[2].innerHTML = `<span class="st st-run">處理中</span>`;
+          status(`辦理中…（${ev.item + 1}/${ev.total}）`);
+        } else if (ev.type === "log" && ev.item !== undefined) $(".steplog", row(ev.item)).textContent = ev.message;
+        else if (ev.type === "item-done") {
+          const r = row(ev.item);
+          r.children[2].innerHTML = ev.status === "success" ? `<span class="st st-ok">完成</span>` : ev.status === "stopped" ? `<span class="st st-stop">未成立</span>` : `<span class="st st-err">失敗</span>`;
+          $(".steplog", r).textContent = ev.status === "error" ? ev.error : `產出 ${ev.files.length} 個檔案`;
+        } else if (ev.type === "file" && ev.node === "_batch") {
+          $("#svc-files-panel").classList.remove("hidden");
+          $("#svc-files").innerHTML = filesTable([ev.file]);
+        } else if (ev.type === "done" && ev.item === undefined) final = ev;
+        else if (ev.type === "usage" && ev.item === undefined) usage = ev.usage;
+        else if (ev.type === "error" && ev.item === undefined) throw new Error(ev.message);
+      },
+      currentAbort.signal,
+    );
+    if (final?.output) {
+      $("#svc-out-panel").classList.remove("hidden");
+      $("#svc-out").innerHTML = md(final.output);
+    }
+    const secs = ((Date.now() - t0) / 1000).toFixed(1);
+    status(final ? `批次辦理完成（${secs} 秒）：${final.batch.ok}/${final.batch.total} 個檔案完成。${usageText(usage)}` : "辦理失敗");
+  } catch (e) {
+    status(e.name === "AbortError" ? "已停止" : "辦理失敗");
+    box.insertAdjacentHTML("afterbegin", `<div class="alert" id="svc-error">${esc(e.name === "AbortError" ? "已停止辦理。" : e.message)}</div>`);
+  } finally {
+    submit.disabled = false;
+    $("#svc-stop").classList.add("hidden");
+    currentAbort = null;
+  }
+  box.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 
 async function runService(svc) {
   if (svc.ai === "speech" || svc.ai === "imagegen" ? needKey(svc.name, svc.ai) : svc.ai !== "none" && needKey(svc.name)) return;

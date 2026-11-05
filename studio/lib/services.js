@@ -11,8 +11,8 @@
 //     speech＝需要語音轉文字服務／imagegen＝需要圖片生成服務
 
 export const CATEGORIES = [
-  { id: "office", name: "文書行政", desc: "公文、會議紀錄、信件、合併列印、流程圖、校對、摘要、比對" },
-  { id: "research", name: "學術研究", desc: "文獻搜尋、論文對照翻譯、文獻回顧、引用格式、報告排版與格式檢查" },
+  { id: "office", name: "文書行政", desc: "公文、會議紀錄、信件、簡報、合併列印、名單比對、流程圖、校對、摘要" },
+  { id: "research", name: "學術研究", desc: "文獻搜尋、論文對照翻譯、文獻回顧、參考文獻查核、報告排版與格式檢查" },
   { id: "docs", name: "文件與資料", desc: "文字辨識、翻譯、擷取表格、資料分析、格式轉換" },
   { id: "media", name: "影音與圖片", desc: "錄音轉逐字稿、會議錄音整理、圖片分析、AI 生成圖片、簡報講稿" },
   { id: "web", name: "網站與資訊", desc: "網站檢測、網頁監控、新聞摘要、網路研究" },
@@ -169,6 +169,52 @@ export const SERVICES = [
     ],
   },
 
+  {
+    id: "slides",
+    cat: "office",
+    name: "簡報產生",
+    desc: "把報告、論文、會議紀錄或大綱轉成 PowerPoint 簡報：自動規劃重點頁、對照頁、表格、可編輯的圖表與流程圖，每頁附講稿。",
+    ai: "normal",
+    notes: [
+      "AI 只呼叫 1 次規劃整份簡報；圖表為 PowerPoint 原生圖表，可再修改數字與樣式。",
+      "只會使用文件中出現的數字與事實；產出後請檢查內容是否正確。",
+      "選「內容已是大綱」時不使用 AI：「# 簡報標題」「## 每張投影片標題」「- 重點」，表格、```flow 流程圖寫法、「備註：講稿」也可以直接轉換。",
+      "講稿放在每張投影片的「備忘稿」中。",
+    ],
+    fields: [
+      { ...DOC_SOURCES, key: "doc", label: "內容來源" },
+      { key: "mode", label: "方式", type: "select", options: { ai: "由 AI 依文件規劃投影片", outline: "內容已是大綱，直接轉成投影片（不用 AI）" }, default: "ai" },
+      { key: "count", label: "投影片張數（約）", type: "number", default: 10 },
+      { key: "audience", label: "對象", type: "text", placeholder: "例：系務會議委員、計畫審查委員" },
+      { key: "minutes", label: "報告時間（分鐘）", type: "number", placeholder: "例：15" },
+      { key: "theme", label: "樣式", type: "select", options: { official: "公務藍（深藍標題列）", simple: "簡約白（細線條）" }, default: "official" },
+      { key: "presenter", label: "報告人", type: "text" },
+      { key: "org", label: "單位", type: "text" },
+    ],
+    nodes: [{ id: "deck", type: "slides", source: "{{form.doc}}", mode: "{{form.mode}}", count: "{{form.count}}", audience: "{{form.audience}}", minutes: "{{form.minutes}}", theme: "{{form.theme}}", presenter: "{{form.presenter}}", org: "{{form.org}}", closing: true, filename: "", out: "deck" }],
+  },
+  {
+    id: "list-tools",
+    cat: "office",
+    name: "名單整理與比對",
+    desc: "比對兩份名單找出差異（例如誰還沒繳交、誰未報到）、合併多份名單、去除重複、依系所等欄位分組，輸出 Excel。",
+    ai: "none",
+    notes: [
+      "比對：第一份為基準名單（例如全班名單），第二份為對照名單（例如已繳交名單），會列出只在其中一份、兩份都有、資料不一致的人。",
+      "比對欄位留空時自動選擇（學號、身分證、Email、員工編號、姓名依序優先）；可指定多個欄位，例如「姓名, 生日」。",
+      "比對時忽略空白、全形半形、英文大小寫，電話只比對數字。",
+      "名單第一列須為欄位名稱；支援 .xlsx 與 .csv。",
+    ],
+    fields: [
+      { key: "op", label: "功能", type: "select", options: { compare: "比對兩份名單（找出誰還沒繳交、未報到）", merge: "合併多份名單", dedupe: "去除重複", split: "依欄位分組（例如依系所拆開）" }, default: "compare" },
+      { key: "files", label: "名單檔（.xlsx / .csv）", type: "files", required: true, accept: ".xlsx,.csv" },
+      { key: "keys", label: "比對／判斷重複的欄位", type: "text", placeholder: "例：學號（留空則自動選擇）" },
+      { key: "splitCol", label: "分組欄位", type: "text", placeholder: "例：系所（只用於「依欄位分組」）" },
+      { key: "splitOutput", label: "分組輸出", type: "select", options: { sheets: "一個 Excel，每組一個工作表", files: "每組一個 Excel 檔（ZIP）" }, default: "sheets" },
+      { key: "loose", label: "忽略空白、全半形、大小寫差異", type: "checkbox", default: true },
+    ],
+    nodes: [{ id: "list", type: "list_tool", op: "{{form.op}}", fileIds: "{{form.files}}", keys: "{{form.keys}}", splitCol: "{{form.splitCol}}", splitOutput: "{{form.splitOutput}}", loose: "{{form.loose}}", filename: "名單整理-{{today}}", out: "lists" }],
+  },
   {
     id: "mail-merge",
     cat: "office",
@@ -666,6 +712,21 @@ export const SERVICES = [
   },
   // ======================= 報告格式檢查 =======================
   {
+    id: "ref-check",
+    cat: "research",
+    name: "參考文獻查核",
+    desc: "逐筆到 Crossref 確認參考文獻真的存在，比對作者、年份、期刊、卷期、頁碼與 DOI，找出捏造或抄錯的文獻，並依正確資料產生 APA 格式清單。",
+    ai: "none",
+    notes: [
+      "不使用 AI；以 Crossref 開放資料查核（約收錄 1.5 億筆期刊論文、會議論文與書籍章節）。",
+      "可貼上文獻清單，或上傳整份報告／論文（會自動找出「參考文獻」或 References 章節）。",
+      "「查無此文獻」可能是 AI 寫作時捏造的文獻，或書目資料錯誤；書籍、學位論文、報告、中文文獻 Crossref 收錄有限，請自行查證。",
+      "中文文獻只檢查格式（作者，篇名，來源，卷期頁碼，年份。）。一次最多 200 筆，每筆約需 0.5–1 秒。",
+    ],
+    fields: [{ ...DOC_SOURCES, key: "doc", label: "文獻清單或文件", help: "每行一筆文獻；或上傳含「參考文獻」章節的 Word、PDF" }],
+    nodes: [{ id: "check", type: "ref_check", source: "{{form.doc}}", out: "refs" }],
+  },
+  {
     id: "paper-pdf-translate",
     cat: "research",
     name: "論文 PDF 對照翻譯",
@@ -690,6 +751,7 @@ export const SERVICES = [
   {
     id: "report-build",
     cat: "research",
+    noBatch: true,
     name: "報告自動排版",
     desc: "把報告草稿（Word、Markdown 或直接貼上）排成符合國科會／計畫成果報告格式的 Word 檔：封面、摘要、自動目錄、圖目錄、表目錄、章節編號、圖表編號與交互參照、參考文獻排序與懸掛縮排。",
     ai: "none",
@@ -877,6 +939,16 @@ export function getService(id) {
   const s = SERVICES.find((x) => x.id === id);
   if (!s) throw Object.assign(new Error("找不到此服務"), { status: 404 });
   return s;
+}
+
+/**
+ * 可批次辦理的欄位：服務中唯一的「文件來源」或「原始檔案」欄位（例如 20 份報告逐一做格式檢查）。
+ * 有兩個以上檔案欄位（合併列印）、或標示 noBatch 的服務不提供批次。
+ */
+export function batchField(svc) {
+  if (svc.noBatch) return null;
+  const f = svc.fields.filter((x) => x.type === "doc" || x.type === "file");
+  return f.length === 1 ? f[0] : null;
 }
 
 /** 檢查必填欄位，回傳錯誤訊息陣列 */

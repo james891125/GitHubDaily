@@ -540,3 +540,181 @@ describe("合併列印", () => {
     assert.equal(formatValue("abc", "千分位"), "abc");
   });
 });
+
+// ======================= 新增：參考文獻查核、簡報、名單整理 =======================
+import { startScholarMock } from "./fixtures.js";
+import { parseOutline as parseDeckOutline, sanitizeDeck, buildPptx, deckToMarkdown } from "../lib/slides.js";
+import { normalize, compareLists, mergeLists, dedupe, splitBy, compareReport, guessKey } from "../lib/listtools.js";
+
+describe("參考文獻查核", () => {
+  test("拆出每筆文獻：編號跨行、整份文件中找參考文獻章節", async () => {
+    const R = await import("../lib/refcheck.js");
+    const list = R.splitReferences(R.extractReferenceSection(fs.readFileSync(path.join(FILES, "參考文獻清單.txt"), "utf8")));
+    assert.equal(list.length, 6);
+    assert.match(list[2], /computational mechanics\. Computational Mechanics, 22\(2\)/, "跨行的文獻應接回同一筆");
+    const doc = "# 緒論\n內文 (Iverson, 1997)。\n\n# 參考文獻\n\n1. Iverson, R. M. (1997). The physics of debris flows. Reviews of Geophysics, 35(3), 245-296.\n\n# 附錄\n\n會議紀錄";
+    assert.deepEqual(R.splitReferences(R.extractReferenceSection(doc)), ["Iverson, R. M. (1997). The physics of debris flows. Reviews of Geophysics, 35(3), 245-296."]);
+  });
+  test("解析 APA／IEEE：年份、標題、第一作者、卷期頁碼；DOI 擷取", async () => {
+    const R = await import("../lib/refcheck.js");
+    const p = R.parseReference("Atluri, S. N., & Zhu, T. (1998). A new meshless local Petrov-Galerkin approach. Computational Mechanics, 22(2), 117-127.");
+    assert.deepEqual([p.year, p.firstAuthor, p.volume, p.issue, p.pages], ["1998", "Atluri", "22", "2", "117-127"]);
+    assert.match(p.title, /^A new meshless local Petrov-Galerkin approach$/);
+    const q = R.parseReference('S. N. Atluri and T. Zhu, "A new meshless local Petrov-Galerkin approach," Comput. Mech., vol. 22, no. 2, pp. 117-127, 1998.');
+    assert.equal(q.title, "A new meshless local Petrov-Galerkin approach");
+    assert.equal(q.year, "1998");
+    assert.equal(R.extractDoi("... 245-296. https://doi.org/10.1029/97RG00426."), "10.1029/97RG00426");
+    assert.equal(R.extractDoi("doi:10.1007/s004660050346, accessed"), "10.1007/s004660050346");
+  });
+  test("APA 格式：作者縮寫、& 連接、卷期頁碼與 DOI", async () => {
+    const R = await import("../lib/refcheck.js");
+    const apa = R.toApa({ authors: [{ family: "Ku", given: "Cheng-Yu" }, { family: "Liu", given: "Chein-Shan" }, { family: "Fan", given: "Chia Ming" }], year: "2018", title: "A method.", journal: "Engineering Analysis with Boundary Elements", volume: "87", issue: null, pages: "91-102", doi: "10.1016/x" });
+    assert.equal(apa, "Ku, C.-Y., Liu, C.-S., & Fan, C. M. (2018). A method. Engineering Analysis with Boundary Elements, 87, 91-102. https://doi.org/10.1016/x");
+  });
+  test("查核：正確、有差異（年份頁碼、缺 DOI）、捏造、DOI 抄錯、DOI 屬於別篇、中文", async () => {
+    const mock = await startScholarMock();
+    const prev = process.env.SCHOLAR_CROSSREF_BASE;
+    process.env.SCHOLAR_CROSSREF_BASE = mock.url + "/cr";
+    try {
+      const R = await import(`../lib/refcheck.js?t=${Date.now()}`);
+      const res = await R.checkReferences(fs.readFileSync(path.join(FILES, "參考文獻清單.txt"), "utf8"), { delayMs: 0 });
+      assert.deepEqual(res.map((r) => r.status), ["中文未查核", "正確", "有差異", "查無此文獻", "DOI 錯誤", "DOI 錯誤"]);
+      assert.match(res[2].detail, /年份應為 1998（文獻寫 1999）；頁碼應為 117-127（文獻寫 117-130）；缺少 DOI（10\.1007\/s004660050346）/);
+      assert.match(res[4].detail, /正確 DOI 為 10\.1016\/j\.enganabound\.2017\.10\.009/);
+      assert.match(res[5].detail, /對應的是另一篇文獻：「The physics of debris flows」/);
+      assert.equal(res[5].apa, undefined, "DOI 屬於別篇時不可拿別篇當修正結果");
+      const fixed = R.correctedList(res);
+      assert.match(fixed[0], /^劉芷妤/);
+      assert.ok(fixed.some((x) => /^【待查證】Smith/.test(x)));
+      assert.ok(fixed.some((x) => /^Atluri, S\. N\., & Zhu, T\. \(1998\)\..*117-127\. https:\/\/doi\.org\/10\.1007\/s004660050346$/.test(x)));
+      const md = R.refcheckMarkdown(res);
+      assert.match(md, /共 6 筆：查無此文獻 1 筆、DOI 錯誤 2 筆、有差異 1 筆、正確 1 筆、中文未查核 1 筆/);
+      const wb = new (await import("exceljs")).default.Workbook();
+      await wb.xlsx.load(await R.refcheckXlsx(res));
+      assert.equal(wb.worksheets[0].rowCount, 7);
+    } finally {
+      process.env.SCHOLAR_CROSSREF_BASE = prev;
+      mock.server.close();
+    }
+  });
+  test("沒有文獻、Crossref 連不上時清楚說明", async () => {
+    const prev = process.env.SCHOLAR_CROSSREF_BASE;
+    process.env.SCHOLAR_CROSSREF_BASE = "http://127.0.0.1:9/cr";
+    try {
+      const R = await import(`../lib/refcheck.js?u=${Date.now()}`);
+      await assert.rejects(R.checkReferences("   "), /沒有讀到任何文獻/);
+      await assert.rejects(R.checkReferences("Iverson, R. M. (1997). The physics of debris flows. Reviews of Geophysics, 35(3), 245-296.", { delayMs: 0 }), /無法連線到 Crossref/);
+    } finally {
+      process.env.SCHOLAR_CROSSREF_BASE = prev;
+    }
+  });
+});
+
+describe("簡報產生", () => {
+  const outline = `# 期末報告
+王大明｜河海工程學系
+
+## 研究背景
+- 地下水是重要水資源
+  - 占用水三分之一
+- 傳統方法需建立網格
+備註：先說明背景。
+
+## 數值結果
+| 方法 | 誤差 |
+|---|---|
+| 本方法 | 0.01 |
+
+## 研究流程
+\`\`\`flow
+開始 -> 建模 -> 結束
+\`\`\`
+
+# 第二部分
+`;
+  test("大綱解析：標題、副標題、重點與子項目、表格、流程圖、章節頁、講稿", () => {
+    const d = parseDeckOutline(outline);
+    assert.equal(d.title, "期末報告");
+    assert.equal(d.subtitle, "王大明｜河海工程學系");
+    assert.deepEqual(d.slides.map((s) => s.type), ["bullets", "table", "diagram", "section"]);
+    assert.deepEqual(d.slides[0].bullets.map((b) => b.level), [0, 1, 0]);
+    assert.equal(d.slides[0].notes, "先說明背景。");
+    assert.throws(() => parseDeckOutline(""), /沒有投影片/);
+  });
+  test("檢查 AI 結果：資料不完整的圖表、表格改為文字頁；數列最多 4 個", () => {
+    const d = sanitizeDeck({ title: "x", slides: [{ type: "chart", title: "壞", chart: { kind: "bar", labels: ["a", "b"], series: [{ name: "s", values: [1] }] } }, { type: "chart", title: "多", chart: { kind: "line", labels: ["a"], series: Array.from({ length: 6 }, (_, i) => ({ name: "s" + i, values: [i] })) } }, { type: "table", title: "空" }, { title: "" }] });
+    assert.deepEqual(d.slides.map((s) => s.type), ["bullets", "chart", "bullets"]);
+    assert.equal(d.slides[1].chart.series.length, 4);
+    assert.throws(() => sanitizeDeck({ slides: [] }), /沒有產生任何投影片/);
+  });
+  test("產生 .pptx：封面、每頁一張、原生圖表、流程圖圖片、講稿、結尾頁", async () => {
+    const deck = sanitizeDeck({
+      ...parseDeckOutline(outline),
+      slides: [...parseDeckOutline(outline).slides, { type: "chart", title: "時間", chart: { kind: "bar", labels: ["甲", "乙"], series: [{ name: "秒", values: [12, 45] }] }, notes: "比較" }, { type: "twocol", title: "比較", left: ["a"], right: ["b"] }],
+    });
+    const buf = await buildPptx(deck, { presenter: "王大明", org: "海大", theme: "simple" });
+    const zip = await JSZip.loadAsync(buf);
+    const slides = Object.keys(zip.files).filter((f) => /^ppt\/slides\/slide\d+\.xml$/.test(f));
+    assert.equal(slides.length, deck.slides.length + 2, "封面 + 內容 + 結尾");
+    assert.equal(Object.keys(zip.files).filter((f) => /^ppt\/charts\/chart\d+\.xml$/.test(f)).length, 1);
+    assert.ok(Object.keys(zip.files).some((f) => /^ppt\/media\/.*\.png$/.test(f)), "流程圖應為圖片");
+    const notes = await Promise.all(Object.keys(zip.files).filter((f) => /notesSlide\d+\.xml$/.test(f)).map((f) => zip.file(f).async("string")));
+    assert.ok(notes.some((n) => n.includes("先說明背景。")));
+    const all = (await Promise.all(slides.map((f) => zip.file(f).async("string")))).join("");
+    assert.match(all, /敬請指教/);
+    assert.match(all, /地下水是重要水資源/);
+    const text = (await parseDocument("deck.pptx", buf)).text;
+    assert.match(text, /期末報告/);
+    assert.match(deckToMarkdown(deck), /> 講稿：先說明背景。/);
+  });
+});
+
+describe("名單整理與比對", () => {
+  const load = async (n) => ({ name: n.replace(/\.\w+$/, ""), ...(await parseTable(n, fs.readFileSync(path.join(FILES, n)))) });
+  test("正規化：全形、空白、大小寫、電話", () => {
+    assert.equal(normalize("Ｂ１１００１"), "b11001");
+    assert.equal(normalize(" B11003 "), "b11003");
+    assert.equal(normalize("0912-345-678"), normalize("+886 912 345 678"));
+    assert.equal(normalize(" ABC ", { loose: false }), "ABC");
+  });
+  test("比對：自動選學號、忽略格式差異；只在一份、資料不一致、名單內重複", async () => {
+    const A = await load("全班名單.xlsx");
+    const B = await load("已繳交名單.csv");
+    assert.deepEqual(guessKey(A.columns, B.columns), ["學號"]);
+    const r = compareLists(A, B);
+    assert.deepEqual(r.onlyA.map((x) => x.姓名), ["李美華", "張家豪"]);
+    assert.deepEqual(r.onlyB.map((x) => x.姓名), ["旁聽生"]);
+    assert.equal(r.both.length, 3);
+    assert.deepEqual(r.changed.map((c) => [c.a.學號, c.diffs.map((d) => d.col)]), [["B11004", ["Email"]]]);
+    assert.equal(r.dupB.length, 1);
+    // 不忽略格式時，全形學號與大小寫不同就對不上
+    assert.equal(compareLists(A, B, { loose: false }).both.length, 1);
+    const rep = await compareReport(A, B, r);
+    const wb = new (await import("exceljs")).default.Workbook();
+    await wb.xlsx.load(rep.xlsx);
+    assert.deepEqual(wb.worksheets.map((w) => w.name), ["只在「全班名單」", "只在「已繳交名單」", "兩份都有", "資料不一致", "名單內重複"]);
+    assert.match(rep.markdown, /## 只在「全班名單」（例如：應繳未繳、未報到）\n\n- B11002（李美華）/);
+  });
+  test("指定欄位、欄位不存在、沒有共同欄位", async () => {
+    const A = await load("全班名單.xlsx");
+    const B = await load("已繳交名單.csv");
+    assert.equal(compareLists(A, B, { keys: "姓名" }).both.length, 3);
+    assert.throws(() => compareLists(A, B, { keys: "生日" }), /第一份名單找不到欄位：「生日」/);
+    assert.throws(() => compareLists({ name: "a", columns: ["甲"], rows: [] }, { name: "b", columns: ["乙"], rows: [] }), /沒有相同名稱的欄位/);
+  });
+  test("合併、去除重複、分組", async () => {
+    const A = await load("全班名單.xlsx");
+    const B = await load("已繳交名單.csv");
+    const m = mergeLists([A, B]);
+    assert.equal(m.columns[0], "來源檔案");
+    assert.ok(m.columns.includes("繳交時間") && m.columns.includes("系所"));
+    assert.equal(m.rows.length, 10);
+    const d = dedupe(m, { keys: "學號" });
+    assert.deepEqual([d.kept.length, d.removed.length], [6, 4]);
+    assert.equal(d.removed[0].與第幾筆重複, 1);
+    assert.equal(dedupe(B).removed.length, 0, "整列比對時，繳交時間不同就不算重複");
+    const g = splitBy(A, "系所");
+    assert.deepEqual([...g].map(([k, v]) => [k, v.length]), [["河海工程學系", 3], ["資訊工程學系", 2]]);
+    assert.throws(() => splitBy(A, "年級"), /找不到分組欄位「年級」/);
+  });
+});

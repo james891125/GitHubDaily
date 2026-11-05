@@ -67,6 +67,13 @@ export function makePdf(lines) {
   return Buffer.from(pdf, "latin1");
 }
 
+/** 假的 Crossref 書目資料（參考文獻查核用） */
+export const CROSSREF_DB = [
+  { DOI: "10.1029/97RG00426", title: ["The physics of debris flows"], author: [{ family: "Iverson", given: "Richard M." }], issued: { "date-parts": [[1997]] }, "container-title": ["Reviews of Geophysics"], volume: "35", issue: "3", page: "245-296", type: "journal-article" },
+  { DOI: "10.1007/s004660050346", title: ["A new Meshless Local Petrov-Galerkin (MLPG) approach in computational mechanics"], author: [{ family: "Atluri", given: "S. N." }, { family: "Zhu", given: "T." }], issued: { "date-parts": [[1998]] }, "container-title": ["Computational Mechanics"], volume: "22", issue: "2", page: "117-127", type: "journal-article" },
+  { DOI: "10.1016/j.enganabound.2017.10.009", title: ["A novel spacetime collocation meshless method for solving two-dimensional backward heat conduction problems"], author: [{ family: "Ku", given: "Cheng-Yu" }, { family: "Liu", given: "Chein-Shan" }, { family: "Fan", given: "Chia-Ming" }], issued: { "date-parts": [[2018]] }, "container-title": ["Engineering Analysis with Boundary Elements"], volume: "87", issue: null, page: "91-102", type: "journal-article" },
+];
+
 /** 假的 Elsevier / Crossref / OpenAlex API 與一份開放取用 PDF */
 export function startScholarMock() {
   let elsKey = null;
@@ -83,7 +90,19 @@ export function startScholarMock() {
       if (elsKey !== "els-key") return send(401, { error: "bad key" });
       return send(200, { "full-text-retrieval-response": { coredata: { "dc:title": "A meshless method for Laplace problems", "prism:doi": "10.1016/j.enganabound.2017.10.009", "dc:description": "Abstract text" }, originalText: "Elsevier full text. ".repeat(200) } });
     }
+    // Crossref 書目搜尋（參考文獻查核）：依標題字詞重疊度回傳
+    if (u.pathname === "/cr/works" && u.searchParams.get("query.bibliographic")) {
+      const q = u.searchParams.get("query.bibliographic").toLowerCase();
+      const items = CROSSREF_DB.map((w) => ({ w, n: w.title[0].toLowerCase().split(/\W+/).filter((x) => x.length > 3 && q.includes(x)).length })).filter((x) => x.n >= 2).sort((a, b) => b.n - a.n).map((x) => x.w);
+      return send(200, { message: { items } });
+    }
     if (u.pathname === "/cr/works") return send(200, { message: { items: [{ DOI: "10.1016/j.enganabound.2017.10.009" }] } });
+    const crw = /^\/cr\/works\/([^/]+(?:\/[^/]+)?)$/.exec(u.pathname);
+    if (crw && !u.pathname.includes("/transform/")) {
+      const doi = decodeURIComponent(crw[1]).toLowerCase();
+      const w = CROSSREF_DB.find((x) => x.DOI.toLowerCase() === doi);
+      return w ? send(200, { message: w }) : send(404, "Resource not found.", "text/plain");
+    }
     if (u.pathname === "/oa/works/doi:10.1016%2Fj.enganabound.2017.10.009" || u.pathname === "/oa/works/doi:10.1016/j.enganabound.2017.10.009")
       return send(200, { title: "A meshless method for Laplace problems", publication_year: 2018, authorships: [{ author: { display_name: "C.-Y. Ku" } }], abstract_inverted_index: { Meshless: [0], method: [1] }, open_access: { is_oa: true, oa_url: base + "/oa.pdf" }, best_oa_location: { pdf_url: base + "/oa.pdf" } });
     if (u.pathname.startsWith("/oa/works/doi:10.9999"))

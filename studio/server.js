@@ -13,7 +13,8 @@ import * as kb from "./lib/kb.js";
 import * as flow from "./lib/flow.js";
 import { PROVIDERS, providerReady } from "./lib/providers.js";
 import { listModels, speechConfig, imageConfig } from "./lib/media.js";
-import { CATEGORIES, SERVICES, getService, validateForm } from "./lib/services.js";
+import { CATEGORIES, SERVICES, getService, validateForm, batchField } from "./lib/services.js";
+import JSZip from "jszip";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(here, "public");
@@ -282,7 +283,68 @@ const routes = {
   "GET /api/runs": (req, res) => json(res, 200, load("runs", [])),
 
   // ---- 服務目錄 ----
-  "GET /api/services": (req, res) => json(res, 200, { categories: CATEGORIES, services: SERVICES }),
+  "GET /api/services": (req, res) => json(res, 200, { categories: CATEGORIES, services: SERVICES.map((s) => ({ ...s, batchField: batchField(s)?.key || null })) }),
+  // 批次辦理：同一份表單設定，逐一處理多個檔案，最後把所有產出打包成一個 ZIP
+  "POST /api/services/batch": (req, res) =>
+    streamTask(req, res, async ({ send, signal }) => {
+      const b = await body(req);
+      const svc = getService(b.id);
+      const field = batchField(svc);
+      if (!field) throw Object.assign(new Error("此服務不支援批次辦理"), { status: 400 });
+      const ids = (Array.isArray(b.files) ? b.files : []).filter(Boolean);
+      if (!ids.length) throw Object.assign(new Error(`請選擇要批次處理的「${field.label}」`), { status: 400 });
+      if (ids.length > 100) throw Object.assign(new Error(`一次最多 100 個檔案（目前 ${ids.length} 個）`), { status: 400 });
+      const asValue = (id) => (field.type === "doc" ? { kind: "file", fileId: id } : id);
+      const errors = validateForm(svc, { ...b.form, [field.key]: asValue(ids[0]) });
+      if (errors.length) throw Object.assign(new Error(errors.join("；")), { status: 400 });
+      const items = [];
+      for (const [i, id] of ids.entries()) {
+        if (signal.aborted) break;
+        let name = id;
+        try {
+          name = flow.getFileMeta(id).name;
+        } catch {}
+        send({ type: "item-start", item: i, name, total: ids.length });
+        let run;
+        try {
+          const form = await flow.prepareServiceForm(svc, { ...b.form, [field.key]: asValue(id) }, { signal });
+          run = await flow.runFlow({ id: "svc-" + svc.id, name: `${svc.name}（批次）`, nodes: svc.nodes }, { emit: (ev) => ev.type !== "usage" && send({ ...ev, item: i }), signal, settings: getSettings(), vars: { form } });
+        } catch (e) {
+          run = { status: "error", error: e.message, files: [] };
+        }
+        const item = { name, status: run.status, error: run.error || "", files: run.files || [], output: String(run.output || "") };
+        items.push(item);
+        send({ type: "item-done", item: i, name, status: item.status, error: item.error, files: item.files });
+      }
+      // 打包：每個來源檔一個資料夾
+      const zip = new JSZip();
+      const used = new Set();
+      for (const [i, it] of items.entries()) {
+        const dir = `${String(i + 1).padStart(2, "0")}-${it.name.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]/g, "_")}`;
+        for (const f of it.files) {
+          const p = outputPath(f.name);
+          if (!p) continue;
+          let n = `${dir}/${f.name.replace(/^\d+_/, "")}`;
+          for (let k = 2; used.has(n); k++) n = n.replace(/(\.[^.]+)?$/, `-${k}$1`);
+          used.add(n);
+          zip.file(n, fs.readFileSync(p));
+        }
+      }
+      const ok = items.filter((x) => x.status === "success").length;
+      // 每個檔案的簡短說明：優先取「結果／共…」那一行
+      const briefOf = (out) => {
+        const lines = String(out).split("\n").map((l) => l.replace(/^[#>*\-\s]+/, "").replace(/\*\*/g, "").trim()).filter((l) => l && !/^\|/.test(l));
+        return (lines.find((l) => /^(結果|共 ?\d|已排版|有效問卷)/.test(l)) || lines[1] || lines[0] || "").slice(0, 80);
+      };
+      const csv = "\uFEFF檔案,結果,說明,產出檔案數\r\n" + items.map((x) => [x.name, x.status === "success" ? "完成" : x.status === "stopped" ? "條件未成立" : "失敗", x.error, x.files.length].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+      zip.file("辦理結果.csv", csv);
+      const zf = writeOutput(`${svc.name}-批次-${new Date().toLocaleDateString("sv-SE")}.zip`, await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" }));
+      send({ type: "file", node: "_batch", file: zf });
+      const md = `# ${svc.name}：批次辦理結果\n\n共 ${items.length} 個檔案：完成 ${ok} 個${items.length - ok ? `、失敗 ${items.length - ok} 個` : ""}。所有產出已打包成 ZIP（每個檔案一個資料夾，另附「辦理結果.csv」）。\n\n| # | 檔案 | 結果 | 說明 |\n|---|---|---|---|\n${items
+        .map((x, i) => `| ${i + 1} | ${x.name.replace(/\|/g, "／")} | ${x.status === "success" ? "完成" : "**失敗**"} | ${(x.error || briefOf(x.output)).replace(/\|/g, "／")} |`)
+        .join("\n")}`;
+      send({ type: "done", status: ok ? "success" : "error", output: md, files: [zf], batch: { total: items.length, ok } });
+    }),
   "POST /api/services/run": (req, res) =>
     streamTask(req, res, async ({ send, signal }) => {
       const b = await body(req);

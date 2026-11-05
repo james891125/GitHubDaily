@@ -19,7 +19,7 @@ let S;
 const tested = new Set();
 before(async () => {
   // 音檔上限調小到 0.25 MB，以短音檔測試自動分段
-  S = await startStack({ env: { STUDIO_AUDIO_LIMIT_MB: "0.25" } });
+  S = await startStack({ env: { STUDIO_AUDIO_LIMIT_MB: "0.25", REFCHECK_DELAY_MS: "0" } });
 });
 after(() => S?.close());
 
@@ -471,6 +471,127 @@ describe("網站與資訊", () => {
   });
 });
 
+describe("參考文獻查核、簡報、名單比對、批次辦理", () => {
+  before(useClaude);
+  const xlsxSheets = async (file) => {
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(await S.download(file));
+    return wb.worksheets.map((w) => [w.name, w.rowCount]);
+  };
+  test("參考文獻查核：貼上清單，不呼叫 API；產出 Word 與 Excel", async () => {
+    const list = (await import("node:fs")).readFileSync(new URL("./files/參考文獻清單.txt", import.meta.url), "utf8");
+    const r = await run("ref-check", { doc: text(list) });
+    ok(r);
+    assert.equal(r.aiCalls, 0);
+    assert.match(r.done.output, /共 6 筆：查無此文獻 1 筆、DOI 錯誤 2 筆、有差異 1 筆、正確 1 筆、中文未查核 1 筆/);
+    assert.deepEqual(r.files.map((f) => f.name.replace(/^\d+_/, "").replace(/-\d{4}-\d\d-\d\d/, "")), ["參考文獻查核.docx", "參考文獻查核.xlsx"]);
+    const t = await docText(r.files[0]);
+    assert.match(t, /修正後的完整清單/);
+    assert.match(t, /【待查證】Smith/);
+  });
+  test("參考文獻查核：上傳整份報告，自動找出參考文獻章節", async () => {
+    const f = await S.upload("報告-符合規範.docx");
+    const r = await run("ref-check", { doc: { kind: "file", fileId: f.id } });
+    ok(r);
+    assert.match(r.done.output, /共 2 筆/);
+    assert.match(r.done.output, /可補上 DOI 10\.1029\/97RG00426/);
+  });
+  test("簡報產生：AI 只呼叫一次，各種投影片與講稿；不完整的圖表被略過", async () => {
+    const f = await S.upload("會議紀錄.docx");
+    const r = await run("slides", { doc: { kind: "file", fileId: f.id }, mode: "ai", count: 8, audience: "系務會議委員", presenter: "王大明", org: "河海工程學系", theme: "official" });
+    ok(r);
+    assert.equal(r.aiCalls, 1);
+    const body = S.world.claude.calls.at(-1).body;
+    assert.match(JSON.stringify(body.messages), /下週三前完成報價/);
+    assert.match(JSON.stringify(body.messages), /系務會議委員/);
+    assert.ok(r.files[0].name.endsWith("會議重點報告.pptx"));
+    const zip = await JSZip.loadAsync(await S.download(r.files[0]));
+    const slides = Object.keys(zip.files).filter((x) => /^ppt\/slides\/slide\d+\.xml$/.test(x));
+    assert.equal(slides.length, 10, "封面 + 8 張（壞圖表改為文字頁）+ 結尾");
+    assert.equal(Object.keys(zip.files).filter((x) => /^ppt\/charts\/chart\d+\.xml$/.test(x)).length, 1);
+    assert.match(r.done.output, /> 講稿：說明背景。/);
+    assert.match(r.events.filter((e) => e.type === "log").map((e) => e.message).join("\n"), /規劃 8 張：重點 3、章節頁 1、對照 1、表格 1、圖表 1、流程圖 1/);
+  });
+  test("簡報產生：大綱模式不呼叫 API", async () => {
+    const r = await run("slides", { doc: text("# 招生說明會\n\n## 學系特色\n- 實作課程\n- 業界實習\n\n## 未來發展\n- 升學\n- 就業"), mode: "outline", theme: "simple" });
+    ok(r);
+    assert.equal(r.aiCalls, 0);
+    assert.ok(r.files[0].name.endsWith("招生說明會.pptx"));
+    const t = (await parseDocument("x.pptx", await S.download(r.files[0]))).text;
+    assert.match(t, /業界實習/);
+  });
+  test("名單比對：找出未繳交、旁聽生、Email 不一致，不呼叫 API", async () => {
+    const a = await S.upload("全班名單.xlsx");
+    const b = await S.upload("已繳交名單.csv");
+    const r = await run("list-tools", { op: "compare", files: [a.id, b.id], keys: "", loose: true });
+    ok(r);
+    assert.equal(r.aiCalls, 0);
+    assert.match(r.done.output, /只在「全班名單」：2 筆；只在「已繳交名單」：1 筆；資料不一致：1 筆/);
+    assert.match(r.done.output, /B11002（李美華）/);
+    assert.deepEqual(await xlsxSheets(r.files[0]), [["只在「全班名單」", 3], ["只在「已繳交名單」", 2], ["兩份都有", 4], ["資料不一致", 2], ["名單內重複", 2]]);
+    const one = await run("list-tools", { op: "compare", files: [a.id] });
+    assert.match(one.error.message, /比對需要剛好 2 份名單/);
+  });
+  test("名單整理：合併去重、去除重複、分組成多個檔", async () => {
+    const a = await S.upload("全班名單.xlsx");
+    const b = await S.upload("已繳交名單.csv");
+    let r = await run("list-tools", { op: "merge", files: [a.id, b.id], keys: "學號", loose: true });
+    ok(r);
+    assert.deepEqual(await xlsxSheets(r.files[0]), [["合併結果", 7], ["已移除的重複", 5]]);
+    r = await run("list-tools", { op: "dedupe", files: [b.id], keys: "學號", loose: true });
+    ok(r);
+    assert.match(r.done.output, /原有 5 筆，移除 1 筆，保留 4 筆/);
+    r = await run("list-tools", { op: "split", files: [a.id], splitCol: "系所", splitOutput: "files" });
+    ok(r);
+    const zip = await JSZip.loadAsync(await S.download(r.files[0]));
+    assert.equal(Object.keys(zip.files).length, 2);
+    r = await run("list-tools", { op: "split", files: [a.id], splitCol: "" });
+    assert.match(r.error.message, /請填寫「分組欄位」/);
+    const d = await S.upload("會議紀錄.docx");
+    r = await run("list-tools", { op: "dedupe", files: [d.id] });
+    assert.match(r.error.message, /不是 Excel（\.xlsx）或 CSV 檔/);
+  });
+  test("批次辦理：多份報告逐一做格式檢查，失敗的不影響其他，產出打包成 ZIP", async () => {
+    tested.add("_batch");
+    const svcs = (await S.api("/api/services")).services;
+    assert.equal(svcs.find((x) => x.id === "report-format-check").batchField, "file");
+    assert.equal(svcs.find((x) => x.id === "mail-merge").batchField, null);
+    assert.equal(svcs.find((x) => x.id === "report-build").batchField, null);
+    const good = await S.upload("報告-符合規範.docx");
+    const bad = await S.upload("報告-格式錯誤.docx");
+    const pdf = await S.upload("中文報告.pdf");
+    const events = await S.stream("/api/services/batch", { id: "report-format-check", form: { profile: "academic", fix: true }, files: [good.id, bad.id, pdf.id] });
+    const done = last(events, "done");
+    assert.equal(done.item, undefined);
+    assert.deepEqual(done.batch, { total: 3, ok: 2 });
+    assert.deepEqual(events.filter((e) => e.type === "item-done").map((e) => e.status), ["success", "success", "error"]);
+    assert.match(events.filter((e) => e.type === "item-done")[2].error, /需要 Word 檔/);
+    const zip = await JSZip.loadAsync(await S.download(done.files[0]));
+    const names = Object.keys(zip.files).filter((n) => !zip.files[n].dir).sort();
+    assert.ok(names.includes("辦理結果.csv"));
+    assert.ok(names.some((n) => /^01-報告-符合規範\/格式檢查結果-.*\.docx$/.test(n)), names.join());
+    assert.ok(names.some((n) => /^02-報告-格式錯誤\/報告-格式錯誤-格式修正\.docx$/.test(n)), names.join());
+    assert.ok(!names.some((n) => n.startsWith("03-")));
+    assert.match((await zip.file("辦理結果.csv").async("string")), /中文報告\.pdf","失敗"/);
+    assert.match(done.output, /完成 2 個、失敗 1 個/);
+  });
+  test("批次辦理：AI 服務逐一處理並累計用量；不支援或未選檔時說明", async () => {
+    const a = await S.upload("說明.txt");
+    const b = await S.upload("筆記.md");
+    const before = S.world.claude.calls.length;
+    const events = await S.stream("/api/services/batch", { id: "summarize", form: { style: "重點條列" }, files: [a.id, b.id] });
+    assert.deepEqual(last(events, "done").batch, { total: 2, ok: 2 });
+    assert.equal(S.world.claude.calls.length - before, 2);
+    assert.equal(last(events, "usage").usage.calls, 2);
+    let ev = await S.stream("/api/services/batch", { id: "mail-merge", form: {}, files: [a.id] });
+    assert.match(last(ev, "error").message, /不支援批次/);
+    ev = await S.stream("/api/services/batch", { id: "summarize", form: {}, files: [] });
+    assert.match(last(ev, "error").message, /請選擇要批次處理的「要摘要的文件」/);
+    ev = await S.stream("/api/services/batch", { id: "official-document", form: {}, files: [a.id] });
+    assert.match(last(ev, "error").message, /不支援批次/);
+  });
+});
+
 describe("合併列印、圖表、論文對照翻譯、報告排版", () => {
   before(useClaude);
   test("合併列印：每人一個 Word（ZIP），檔名可用欄位，不呼叫 API", async () => {
@@ -818,6 +939,7 @@ describe("定期執行與共通行為", () => {
   });
   test("所有服務都有測試涵蓋", () => {
     const missing = SERVICES.map((s) => s.id).filter((id) => !tested.has(id));
+    assert.ok(tested.has("_batch"), "批次辦理沒有測試");
     assert.deepEqual(missing, [], "以下服務沒有測試：" + missing.join(", "));
   });
 });

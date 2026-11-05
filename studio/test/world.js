@@ -115,6 +115,26 @@ export function fakeAnswer(system, userText, { hasPdf = false, hasImage = false 
   const all = `${system || ""}\n${userText}`;
   if (hasPdf || hasImage) return { text: `（${hasPdf ? "PDF" : "圖片"}文字辨識結果）\n\n# 掃描文件\n\n本校圖書館開放時間為上午八點至晚上十點。\n\n| 項目 | 時間 |\n|---|---|\n| 平日 | 08:00-22:00 |` };
   if (all.includes("REFUSE_ME")) return { refuse: true };
+  // 簡報規劃：回傳各種投影片類型（含一個資料不完整的圖表，應被略過）
+  if (all.includes("規劃一份簡報投影片")) {
+    const topic = /下週三前完成報價/.test(userText) ? "會議重點" : "研究成果";
+    return {
+      text: JSON.stringify({
+        title: `${topic}報告`,
+        subtitle: "測試簡報",
+        slides: [
+          { type: "bullets", title: "背景", bullets: ["重點一", "重點二", "重點三"], notes: "說明背景。" },
+          { type: "section", title: "方法" },
+          { type: "twocol", title: "比較", leftTitle: "舊方法", left: ["需網格"], rightTitle: "新方法", right: ["免網格"], notes: "比較兩種方法。" },
+          { type: "table", title: "數據", columns: ["項目", "數值"], rows: [["誤差", "0.01"], ["時間", "12"]], notes: "數據如表。" },
+          { type: "chart", title: "計算時間", chart: { kind: "bar", labels: ["本方法", "傳統方法"], series: [{ name: "秒", values: [12, 45] }], unit: "秒" }, notes: "本方法較快。" },
+          { type: "diagram", title: "流程", diagram: { kind: "flow", text: "開始 -> 建模 -> 驗證？\n驗證？ -[通過]-> 結束" }, notes: "研究流程。" },
+          { type: "chart", title: "壞圖表", chart: { kind: "bar", labels: ["a", "b"], series: [{ name: "x", values: [1] }] } },
+          { type: "bullets", title: "結論與建議", bullets: ["結論一", "建議一"], notes: "以上報告。" },
+        ],
+      }),
+    };
+  }
   if (all.includes('{"results":')) {
     const n = (userText.match(/<item id="/g) || []).length;
     const items = userText.split(/<item id="\d+">/).slice(1);

@@ -19,6 +19,9 @@ import { translatePdf, bilingualMarkdown } from "./pdftranslate.js";
 import { renderDiagram, svgToPng as diagramPng, diagramPrompt, DIAGRAM_TYPES } from "./diagram.js";
 import { buildReport, docxToMarkdown } from "./reportbuild.js";
 import { mailMerge } from "./mailmerge.js";
+import { checkReferences, refcheckMarkdown, refcheckXlsx, correctedList, summarize as refSummary } from "./refcheck.js";
+import { parseOutline as parseDeckOutline, deckPrompt, DECK_SCHEMA, sanitizeDeck, buildPptx, deckToMarkdown, THEMES } from "./slides.js";
+import { compareLists, compareReport, mergeLists, dedupe, splitBy, toWorkbook } from "./listtools.js";
 import { checkDocx as checkReportDocx } from "./formatcheck.js";
 import { miniMarkdown } from "../public/mini-md.js";
 import JSZip from "jszip";
@@ -337,6 +340,43 @@ export const NODE_TYPES = {
       filename: { label: "檔名（可用 {{欄位}}）", type: "text", default: "" },
     },
     out: "merge",
+  },
+  ref_check: {
+    label: "參考文獻查核",
+    desc: "逐筆到 Crossref 確認文獻存在，比對作者、年份、卷期頁碼與 DOI，產生修正後的 APA 清單（不使用 AI）",
+    fields: { source: { label: "文獻清單或含參考文獻的文件", type: "text", default: "{{doc}}" } },
+    out: "refs",
+  },
+  slides: {
+    label: "產生簡報",
+    desc: "文件 → PowerPoint：AI 規劃投影片（重點、對照、表格、原生圖表、流程圖）並附講稿；或直接把大綱轉成投影片",
+    fields: {
+      source: { label: "內容", type: "text", default: "{{doc}}" },
+      mode: { label: "方式", type: "select", options: { ai: "由 AI 依文件規劃投影片", outline: "內容已是大綱，直接轉成投影片（不用 AI）" }, default: "ai" },
+      count: { label: "投影片張數（約）", type: "number", default: 10 },
+      audience: { label: "對象", type: "text", default: "" },
+      minutes: { label: "報告時間（分鐘）", type: "number", default: "" },
+      theme: { label: "樣式", type: "select", options: Object.fromEntries(Object.entries(THEMES).map(([k, v]) => [k, v.name])), default: "official" },
+      presenter: { label: "報告人", type: "text", default: "" },
+      org: { label: "單位", type: "text", default: "" },
+      closing: { label: "最後加上「敬請指教」頁", type: "checkbox", default: true },
+      filename: { label: "檔名", type: "text", default: "簡報-{{today}}" },
+    },
+    out: "deck",
+  },
+  list_tool: {
+    label: "名單整理與比對",
+    desc: "比對兩份名單（誰還沒繳交）、合併多份名單、去除重複、依欄位分組；忽略空白、全半形、大小寫差異",
+    fields: {
+      op: { label: "功能", type: "select", options: { compare: "比對兩份名單", merge: "合併多份名單", dedupe: "去除重複", split: "依欄位分組" }, default: "compare" },
+      fileIds: { label: "名單檔（Excel／CSV，可多選）", type: "files", default: "" },
+      keys: { label: "比對／判斷重複的欄位（逗號分隔，空白則自動）", type: "text", default: "" },
+      splitCol: { label: "分組欄位", type: "text", default: "" },
+      splitOutput: { label: "分組輸出", type: "select", options: { sheets: "一個 Excel，每組一個工作表", files: "每組一個 Excel 檔（ZIP）" }, default: "sheets" },
+      loose: { label: "忽略空白、全半形、大小寫差異", type: "checkbox", default: true },
+      filename: { label: "檔名", type: "text", default: "名單整理-{{today}}" },
+    },
+    out: "lists",
   },
   webhook: {
     label: "發送通知",
@@ -959,6 +999,93 @@ async function runNode(rawNode, vars, ctx) {
       emit({ type: "file", node: node.id, file: f });
       log(`完成 ${r.count} 份`);
       return { __type: "files", files: [f], markdown: `# 合併列印結果\n\n- 範本：${t.meta.name}\n- 名單：${d.meta.name}，${r.count} 筆\n- 使用的欄位：${r.fields.join("、")}\n- 產出：${{ separate: "每人一個 Word 檔（ZIP）", combined: "合併成一個 Word 檔", pdf: "合併成一個 PDF" }[mode]}` };
+    }
+    case "ref_check": {
+      const src = stringify(resolveRaw(node.source, vars));
+      const results = await checkReferences(src, { signal, log });
+      const c = refSummary(results);
+      log(`查核完成：${Object.entries(c).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join("、")}`);
+      const md = refcheckMarkdown(results);
+      const fixed = correctedList(results);
+      const files = [
+        writeOutput(`參考文獻查核-${vars.today}.docx`, await markdownToDocx(`${md}\n\n## 修正後的完整清單（中文在前、英文在後）\n\n${fixed.map((r, i) => `${i + 1}. ${r}`).join("\n")}`)),
+        writeOutput(`參考文獻查核-${vars.today}.xlsx`, await refcheckXlsx(results)),
+      ];
+      files.forEach((f) => emit({ type: "file", node: node.id, file: f }));
+      return { __type: "files", files, markdown: md, summary: c };
+    }
+    case "slides": {
+      const src = stringify(resolveRaw(node.source, vars)).trim();
+      if (!src) throw Object.assign(new Error("請提供簡報內容"), { status: 400 });
+      let deck;
+      if (node.mode === "outline") {
+        deck = sanitizeDeck(parseDeckOutline(src));
+        log(`依大綱產生 ${deck.slides.length} 張投影片`);
+      } else {
+        log("AI 規劃投影片中…");
+        const data = await generateJson(deckPrompt(compactText(src).slice(0, Math.min(chunkLimits().summarizeSingle, 120000)), { count: Number(node.count) || 10, audience: render(node.audience || "", vars), minutes: node.minutes }), { schema: DECK_SCHEMA, light: false, maxTokens: 16000, signal });
+        deck = sanitizeDeck(data);
+        const kinds = {};
+        for (const sl of deck.slides) kinds[sl.type] = (kinds[sl.type] || 0) + 1;
+        log(`規劃 ${deck.slides.length} 張：${Object.entries(kinds).map(([k, n]) => `${{ bullets: "重點", twocol: "對照", table: "表格", chart: "圖表", diagram: "流程圖", section: "章節頁" }[k] || k} ${n}`).join("、")}`);
+      }
+      const buf = await buildPptx(deck, { theme: node.theme, presenter: render(node.presenter || "", vars).trim(), org: render(node.org || "", vars).trim(), date: `${new Date().getFullYear() - 1911} 年 ${new Date().getMonth() + 1} 月`, closing: node.closing !== false });
+      const f = writeOutput(`${render(node.filename || "", vars).trim() || deck.title}.pptx`, buf);
+      emit({ type: "file", node: node.id, file: f });
+      return { __type: "files", files: [f], markdown: deckToMarkdown(deck) };
+    }
+    case "list_tool": {
+      const ids = String(render(node.fileIds, vars)).split(/[,\s]+/).filter(Boolean);
+      if (!ids.length) throw Object.assign(new Error("請選擇名單檔"), { status: 400 });
+      const tables = [];
+      for (const id of ids) {
+        const { meta, buf } = getFileRaw(id);
+        if (![".csv", ".xlsx", ".tsv", ".txt"].includes(meta.ext)) throw Object.assign(new Error(`「${meta.name}」不是 Excel（.xlsx）或 CSV 檔`), { status: 422 });
+        tables.push({ name: meta.name.replace(/\.\w+$/, ""), ...(await parseTable(meta.name, buf)) });
+      }
+      const op = node.op || "compare";
+      const loose = node.loose !== false && node.loose !== "";
+      const base = render(node.filename || "名單整理", vars).trim() || "名單整理";
+      const keys = render(node.keys || "", vars).trim();
+      let buf;
+      let md;
+      let name = `${base}.xlsx`;
+      if (op === "compare") {
+        if (tables.length !== 2) throw Object.assign(new Error(`比對需要剛好 2 份名單（目前 ${tables.length} 份）：第一份為基準名單（例如全班名單），第二份為對照名單（例如已繳交名單）`), { status: 400 });
+        const r = compareLists(tables[0], tables[1], { keys, loose });
+        log(`以「${r.keys.join("、")}」比對：兩份都有 ${r.both.length}、只在第一份 ${r.onlyA.length}、只在第二份 ${r.onlyB.length}`);
+        ({ xlsx: buf, markdown: md } = await compareReport(tables[0], tables[1], r));
+      } else if (op === "merge") {
+        const m = mergeLists(tables);
+        const d = dedupe(m, { keys, loose });
+        const useDedupe = !!keys;
+        const rows = useDedupe ? d.kept : m.rows;
+        buf = await toWorkbook([{ name: "合併結果", columns: m.columns, rows }, ...(useDedupe && d.removed.length ? [{ name: "已移除的重複", columns: [...m.columns, "與第幾筆重複"], rows: d.removed }] : [])]);
+        md = `# 合併名單\n\n- 合併 ${tables.length} 份：${tables.map((t) => `${t.name}（${t.rows.length} 筆）`).join("、")}\n- 欄位依名稱對齊，共 ${m.columns.length} 欄（含「來源檔案」）\n- 合併後 ${rows.length} 筆${useDedupe ? `；依「${d.keys.join("、")}」移除重複 ${d.removed.length} 筆` : "（未指定判斷重複的欄位，未去除重複）"}`;
+        log(`合併後 ${rows.length} 筆`);
+      } else if (op === "dedupe") {
+        const t = tables.length > 1 ? mergeLists(tables) : tables[0];
+        const d = dedupe(t, { keys, loose });
+        buf = await toWorkbook([{ name: "去除重複後", columns: t.columns, rows: d.kept }, { name: "已移除的重複", columns: [...t.columns, "與第幾筆重複"], rows: d.removed }]);
+        md = `# 去除重複\n\n- 判斷依據：${keys ? d.keys.join("、") : "整列內容相同"}${loose ? "（忽略空白、全半形、大小寫）" : ""}\n- 原有 ${t.rows.length} 筆，移除 ${d.removed.length} 筆，保留 ${d.kept.length} 筆${d.removed.length ? `\n\n## 已移除\n\n${d.removed.slice(0, 30).map((r) => `- ${d.keys.slice(0, 3).map((k) => r[k]).join("／")}（與第 ${r.與第幾筆重複} 筆重複）`).join("\n")}` : ""}`;
+        log(`移除 ${d.removed.length} 筆重複`);
+      } else if (op === "split") {
+        const col = render(node.splitCol || "", vars).trim();
+        if (!col) throw Object.assign(new Error("請填寫「分組欄位」，例如：系所"), { status: 400 });
+        const t = tables.length > 1 ? mergeLists(tables) : tables[0];
+        const groups = splitBy(t, col);
+        if (node.splitOutput === "files") {
+          const zip = new JSZip();
+          for (const [g, rows] of groups) zip.file(`${base}-${g.replace(/[\\/:*?"<>|]/g, "_")}.xlsx`, await toWorkbook([{ name: g, columns: t.columns, rows }]));
+          buf = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+          name = `${base}.zip`;
+        } else buf = await toWorkbook([...groups].map(([g, rows]) => ({ name: g, columns: t.columns, rows })));
+        md = `# 依「${col}」分組\n\n| ${col} | 筆數 |\n|---|---|\n${[...groups].map(([g, rows]) => `| ${g} | ${rows.length} |`).join("\n")}`;
+        log(`分成 ${groups.size} 組`);
+      } else throw Object.assign(new Error(`未知的功能：${op}`), { status: 400 });
+      const f = writeOutput(name, buf);
+      emit({ type: "file", node: node.id, file: f });
+      return { __type: "files", files: [f], markdown: md };
     }
     case "read_file": {
       const { meta, text } = getFileText(render(node.fileId, vars));

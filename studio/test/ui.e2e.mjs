@@ -64,6 +64,8 @@ async function newPage(opts = {}) {
 const p = await newPage();
 const go = async (hash) => {
   await p.goto(BASE + "/" + hash);
+  // 只改變 # 時頁面不會重新載入，要等新頁面繪製完成
+  await p.waitForFunction((h) => document.body.dataset.route === (h === "#/" ? location.hash || "#/" : h), hash);
   await p.waitForSelector(".page-title");
 };
 
@@ -228,6 +230,9 @@ const cases = {
   "pdf-pagenum": { fields: { files: { library: ["講義.pdf"] }, format: { select: "第 {n} 頁，共 {total} 頁" }, skipFirst: true }, expectAi: 0, out: [".pdf"], resultHas: "已加上頁碼" },
   "images-to-pdf": { fields: { files: { upload: ["照片1.jpg", "照片2.jpg"] }, filename: "相簿" }, expectAi: 0, out: [".pdf"], resultHas: "2 張圖片轉成 2 頁 PDF" },
   "pdf-compress": { fields: { files: { library: ["相簿.pdf"] }, level: { select: "high" } }, expectAi: 0, out: [".pdf"], resultHas: "減少" },
+  "ref-check": { fields: { doc: { upload: "參考文獻清單.txt" } }, expectAi: 0, word: true, xlsx: true, resultHas: "查無此文獻" },
+  slides: { fields: { doc: { library: "會議紀錄.docx" }, count: "8", presenter: "王大明" }, out: [".pptx"], resultHas: "講稿" },
+  "list-tools": { fields: { op: { select: "compare" }, files: { upload: ["全班名單.xlsx", "已繳交名單.csv"] } }, expectAi: 0, xlsx: true, resultHas: "只在「全班名單」：2 筆" },
   "mail-merge": { fields: { template: { upload: "獎狀範本.docx" }, data: { upload: "獎狀名單.xlsx" }, mode: { select: "separate" }, filename: "獎狀-{{姓名}}" }, expectAi: 0, out: [".zip"], resultHas: "3 筆" },
   diagram: { fields: { kind: { select: "org" }, content: "研究中心\n  行政組\n  研究組\n    水資源團隊", title: "研究中心組織圖" }, expectAi: 0, out: [".png", ".svg"], resultHas: "研究中心" },
   "paper-pdf-translate": { fields: { file: { upload: "論文.pdf" }, layout: { select: "side" }, table: true }, word: true, out: [".pdf"], resultHas: "翻譯段落" },
@@ -327,6 +332,29 @@ for (const svc of services) {
   });
 }
 
+await step("服務：批次辦理（3 份報告做格式檢查，其中 1 份是 PDF）", async () => {
+  await go("#/svc/report-format-check");
+  assert(!(await p.isVisible("#batch-row")), "批次欄位預設應隱藏");
+  await p.check("#batch-mode");
+  assert(await p.isVisible("#batch-row"), "勾選後應顯示多檔欄位");
+  assert(!(await p.isVisible("#f-file")), "勾選後應隱藏單一檔案欄位");
+  await p.setInputFiles("#f-__batch", ["報告-符合規範.docx", "報告-格式錯誤.docx", "中文報告.pdf"].map(fileArg));
+  await p.selectOption("#f-profile", "academic");
+  const st = await submitService();
+  assert(/批次辦理完成.*2\/3 個檔案完成/.test(st), st + " " + (await p.evaluate(() => document.querySelector("#svc-error")?.textContent || "")));
+  const states = await p.$$eval("#batch-table tbody tr", (rows) => rows.map((r) => r.children[2].textContent.trim()));
+  assert(JSON.stringify(states) === JSON.stringify(["完成", "完成", "失敗"]), JSON.stringify(states));
+  const logs = await p.$$eval("#batch-table .steplog", (els) => els.map((e) => e.textContent));
+  assert(/需要 Word 檔/.test(logs[2]), logs[2]);
+  const links = await p.locator("#svc-files table a").evaluateAll((as) => as.map((a) => ({ href: a.getAttribute("href"), name: a.getAttribute("download") })));
+  assert(links.length === 1 && links[0].name.endsWith(".zip"), JSON.stringify(links));
+  const res = await fetch(BASE + links[0].href);
+  assert(res.status === 200 && (await res.arrayBuffer()).byteLength > 1000, "ZIP 下載失敗");
+  assert((await p.textContent("#svc-out")).includes("完成 2 個、失敗 1 個"));
+  await p.screenshot({ path: path.join(SHOTS, "11-batch.png"), fullPage: true });
+  await p.uncheck("#batch-mode");
+  assert(await p.isVisible("#f-file"), "取消批次後應恢復單一檔案欄位");
+});
 await step("服務：必填欄位未填時顯示錯誤，不送出 AI", async () => {
   await go("#/svc/official-document");
   const before = world.claude.calls.length;
@@ -343,7 +371,8 @@ await step("服務：設為定期執行，於自訂工作流程中可見", async
   await p.click("#sch-save");
   await p.waitForFunction(() => /已建立排程/.test(document.querySelector("#toast").textContent));
   await go("#/flows");
-  assert((await p.textContent("#main")).includes("網站健康檢查（定期）") && (await p.textContent("#main")).includes("每天 07:30"));
+  const main = await p.textContent("#main");
+  assert(main.includes("網站健康檢查（定期）") && main.includes("每天 07:30"), main.slice(0, 400));
 });
 
 // ---------------- 知識庫問答 ----------------

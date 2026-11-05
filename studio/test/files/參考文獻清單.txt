@@ -1,0 +1,8 @@
+參考文獻
+1. 劉芷妤，時空配點無網格法於變飽和度地下水問題之研究，國立臺灣海洋大學河海工程學系博士論文，2023。
+2. Iverson, R. M. (1997). The physics of debris flows. Reviews of Geophysics, 35(3), 245-296. https://doi.org/10.1029/97RG00426
+3. Atluri, S. N., & Zhu, T. (1999). A new meshless local Petrov-Galerkin (MLPG) approach in computational mechanics.
+   Computational Mechanics, 22(2), 117-130.
+4. Smith, J., & Wang, L. (2021). Deep learning surrogate models for transient groundwater flow in fractured aquifers. Water Resources Research, 57(4), 1-18.
+5. Ku, C. Y., Liu, C. S., & Fan, C. M. (2018). A novel spacetime collocation meshless method for solving two-dimensional backward heat conduction problems. Engineering Analysis with Boundary Elements, 87, 91-102. https://doi.org/10.1016/j.enganabound.2017.10.099
+6. Chen, H. (2020). Numerical analysis of slope stability under rainfall infiltration. Landslides, 17, 1-12. doi:10.1029/97RG00426
