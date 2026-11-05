@@ -222,7 +222,7 @@ async function runNode(node, vars, ctx) {
     case "fetch_url": {
       const url = render(node.url, vars).trim();
       log(`擷取 ${url}`);
-      const p = await scrapePage(url, { mode: node.mode, signal });
+      const p = await scrapePage(url, { mode: node.mode, signal, log });
       log(`取得「${p.title}」，${p.markdown.length} 字`);
       return { __type: "page", url: p.url, title: p.title, markdown: p.markdown, links: p.links.slice(0, 200).map((l) => l.url) };
     }
@@ -293,7 +293,7 @@ async function runNode(node, vars, ctx) {
         let content = item;
         if (node.fetch && /^https?:\/\//.test(item)) {
           try {
-            const p = await scrapePage(item, { signal });
+            const p = await scrapePage(item, { signal, log });
             content = `# ${p.title}\n來源：${p.url}\n\n${p.markdown.slice(0, 30000)}`;
           } catch (e) {
             results.push({ item, output: `（擷取失敗：${e.message}）` });
@@ -310,7 +310,7 @@ async function runNode(node, vars, ctx) {
     case "translate":
       return translate(stringify(resolveRaw(node.source, vars)), { target: node.target, onText, onProgress: progress, signal });
     case "summarize":
-      return summarize(stringify(resolveRaw(node.source, vars)), { style: node.style, onText, onProgress: progress, signal });
+      return summarize(stringify(resolveRaw(node.source, vars)), { style: render(node.style, vars), onText, onProgress: progress, signal });
     case "extract": {
       const t = await extractTable(stringify(resolveRaw(node.source, vars)), { fields: render(node.fields, vars), instruction: render(node.instruction, vars), onProgress: progress, signal });
       log(`擷取到 ${t.rows.length} 筆資料`);
@@ -507,6 +507,19 @@ export const TEMPLATES = [
       { id: "n3", type: "summarize", source: "{{translated}}", style: "三到五點重點條列", out: "summary" },
       { id: "n4", type: "set", value: "# {{page.title}}\n\n原文：{{page.url}}\n\n## 摘要\n\n{{summary}}\n\n## 全文翻譯\n\n{{translated}}", out: "text" },
       { id: "n5", type: "save_file", source: "{{text}}", format: "md", filename: "翻譯-{{today}}", out: "file" },
+    ],
+  },
+  {
+    name: "📑 論文 PDF → 繁中翻譯 + 摘要",
+    description: "適用於需要訂閱、無法直接擷取的期刊論文：先在瀏覽器下載 PDF，上傳到「📁 檔案」，在第 1 個節點選擇檔案後執行。",
+    inputLabel: "摘要重點（選填）",
+    inputPlaceholder: "例如：著重研究方法與數值結果",
+    nodes: [
+      { id: "n1", type: "read_file", fileId: "", out: "doc" },
+      { id: "n2", type: "summarize", source: "{{doc}}", style: "學術摘要（研究目的、方法、結果、結論）{{input}}", out: "summary" },
+      { id: "n3", type: "translate", source: "{{doc}}", target: "zh-TW", out: "translated" },
+      { id: "n4", type: "set", value: "# {{doc.name}}\n\n## 摘要\n\n{{summary}}\n\n## 全文翻譯\n\n{{translated}}", out: "text" },
+      { id: "n5", type: "save_file", source: "{{text}}", format: "md", filename: "論文翻譯-{{today}}", out: "file" },
     ],
   },
   {

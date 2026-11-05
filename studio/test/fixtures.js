@@ -66,3 +66,35 @@ export function makePdf(lines) {
   pdf += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
   return Buffer.from(pdf, "latin1");
 }
+
+/** 假的 Elsevier / Crossref / OpenAlex API 與一份開放取用 PDF */
+export function startScholarMock() {
+  let elsKey = null;
+  let base = "";
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url, "http://x");
+    const send = (code, obj, type = "application/json") => {
+      res.writeHead(code, { "content-type": type });
+      res.end(typeof obj === "string" || Buffer.isBuffer(obj) ? obj : JSON.stringify(obj));
+    };
+    if (u.pathname === "/blocked") return send(403, "Forbidden", "text/html");
+    if (u.pathname.startsWith("/els/content/article/pii/")) {
+      elsKey = req.headers["x-els-apikey"];
+      if (elsKey !== "els-key") return send(401, { error: "bad key" });
+      return send(200, { "full-text-retrieval-response": { coredata: { "dc:title": "A meshless method for Laplace problems", "prism:doi": "10.1016/j.enganabound.2017.10.009", "dc:description": "Abstract text" }, originalText: "Elsevier full text. ".repeat(200) } });
+    }
+    if (u.pathname === "/cr/works") return send(200, { message: { items: [{ DOI: "10.1016/j.enganabound.2017.10.009" }] } });
+    if (u.pathname === "/oa/works/doi:10.1016%2Fj.enganabound.2017.10.009" || u.pathname === "/oa/works/doi:10.1016/j.enganabound.2017.10.009")
+      return send(200, { title: "A meshless method for Laplace problems", publication_year: 2018, authorships: [{ author: { display_name: "C.-Y. Ku" } }], abstract_inverted_index: { Meshless: [0], method: [1] }, open_access: { is_oa: true, oa_url: base + "/oa.pdf" }, best_oa_location: { pdf_url: base + "/oa.pdf" } });
+    if (u.pathname.startsWith("/oa/works/doi:10.9999"))
+      return send(200, { title: "Closed paper", publication_year: 2020, abstract_inverted_index: { We: [0], study: [1], closed: [2], things: [3] }, open_access: { is_oa: false } });
+    if (u.pathname === "/oa.pdf") return send(200, makePdf(["Open access full text body"]), "application/pdf");
+    send(404, { error: "nf" });
+  });
+  return new Promise((r) =>
+    server.listen(0, "127.0.0.1", () => {
+      base = `http://127.0.0.1:${server.address().port}`;
+      r({ server, url: base, lastElsKey: () => elsKey });
+    }),
+  );
+}

@@ -7,6 +7,12 @@ import path from "node:path";
 // 測試使用獨立資料夾
 process.env.STUDIO_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "studio-test-"));
 delete process.env.ANTHROPIC_API_KEY;
+// 學術 API 指向本機假伺服器（需在載入模組前設定）
+const { startScholarMock } = await import("./fixtures.js");
+const scholarMock = await startScholarMock();
+process.env.SCHOLAR_ELSEVIER_BASE = scholarMock.url + "/els";
+process.env.SCHOLAR_CROSSREF_BASE = scholarMock.url + "/cr";
+process.env.SCHOLAR_OPENALEX_BASE = scholarMock.url + "/oa";
 
 const { startSite, startMockLlm, makePdf } = await import("./fixtures.js");
 const store = await import("../lib/store.js");
@@ -24,6 +30,7 @@ before(async () => {
   store.saveSettings({ provider: "openai", openaiBase: llm.base, openaiModel: "mock", openaiKey: "test-key" });
 });
 after(() => {
+  scholarMock.server.close();
   site.server.close();
   llm.server.close();
 });
@@ -248,4 +255,43 @@ test("OpenAI 相容：自動切換 max_tokens / max_completion_tokens", async ()
   await postChatCompletion({ base, key: "k", model: "gpt-5", messages: [{ role: "user", content: "hi" }], maxTokens: 100 });
   assert.deepEqual(seen.slice(2), ["max_completion_tokens"]);
   strict.close();
+});
+
+const scholar = await import("../lib/scholar.js");
+
+test("論文：辨識 PII / DOI", () => {
+  assert.deepEqual(scholar.identify("https://www.sciencedirect.com/science/article/pii/S0955799717306604"), { doi: null, pii: "S0955799717306604" });
+  assert.equal(scholar.identify("https://doi.org/10.1016/j.enganabound.2017.10.009").doi, "10.1016/j.enganabound.2017.10.009");
+  assert.equal(scholar.identify("https://example.com/blog"), null);
+});
+
+test("論文：沒有 Elsevier 金鑰 → Crossref 找 DOI → OpenAlex 開放取用 PDF 全文", async () => {
+  store.saveSettings({ elsevierKey: "" });
+  const logs = [];
+  const p = await scholar.fetchPaper("https://www.sciencedirect.com/science/article/pii/S0955799717306604", { log: (m) => logs.push(m) });
+  assert.equal(p.title, "A meshless method for Laplace problems");
+  assert.equal(p.scholar.fullText, true);
+  assert.match(p.markdown, /Open access full text body/);
+  assert.ok(logs.some((l) => l.includes("Crossref")));
+});
+
+test("論文：沒有開放取用 → 只取得摘要並給出明確提示", async () => {
+  store.saveSettings({ elsevierKey: "" });
+  const p = await scholar.fetchPaper("https://doi.org/10.9999/closed.1");
+  assert.equal(p.scholar.fullText, false);
+  assert.match(p.markdown, /We study closed things/);
+  assert.match(p.markdown, /只取得摘要/);
+});
+
+test("論文：有 Elsevier 金鑰時取得全文", async () => {
+  store.saveSettings({ elsevierKey: "els-key" });
+  const p = await scholar.fetchPaper("https://www.sciencedirect.com/science/article/pii/S0955799717306604");
+  assert.equal(p.scholar.source, "Elsevier API");
+  assert.match(p.markdown, /Elsevier full text/);
+  assert.equal(scholarMock.lastElsKey(), "els-key");
+  store.saveSettings({ elsevierKey: "" });
+});
+
+test("網頁 403：一般網站給出可行的解法說明", async () => {
+  await assert.rejects(web.scrapePage(scholarMock.url + "/blocked"), /HTTP 403：.*上傳到「📁 檔案」/);
 });

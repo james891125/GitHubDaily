@@ -57,9 +57,27 @@ async function fetchWithTimeout(url, { timeout = 15000, method = "GET", redirect
  * 擷取單一網頁 → { url, title, markdown, links, meta }
  * mode: "article"（只取正文，Readability）或 "full"（整頁）
  */
-export async function scrapePage(input, { mode = "article", signal } = {}) {
+const BLOCKED_HINT =
+  "此網站拒絕程式直接存取（常見於需要登入、付費訂閱或有防爬蟲保護的網站）。可以：①在瀏覽器開啟後另存網頁或下載 PDF，上傳到「📁 檔案」再用「讀取檔案」節點；②若網站有官方 API，改用「呼叫 API」節點。";
+
+export async function scrapePage(input, { mode = "article", signal, log = () => {} } = {}) {
   const url = normalizeUrl(input);
+  const { fetchPaper, identify, isScholarlySite } = await import("./scholar.js");
+  // 學術論文網址：優先走學術 API（期刊網站通常會擋程式且全文需訂閱）
+  if (isScholarlySite(url.href) && identify(url.href)) {
+    log("偵測到學術論文網址，改用學術資料 API 取得");
+    const paper = await fetchPaper(url.href, { log, signal });
+    if (paper) return paper;
+    log("學術 API 找不到此論文，改為直接擷取網頁");
+  }
   const res = await fetchWithTimeout(url, { signal });
+  if ([401, 403, 429, 451].includes(res.status)) {
+    if (identify(url.href)) {
+      const paper = await fetchPaper(url.href, { log, signal });
+      if (paper) return paper;
+    }
+    throw new Error(`HTTP ${res.status}：${BLOCKED_HINT}`);
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const type = res.headers.get("content-type") || "";
   const body = await res.text();

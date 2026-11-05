@@ -70,6 +70,8 @@ const DEFAULT_SETTINGS = {
   openaiModel: "gpt-4o-mini",
   embedModel: "",
   webhookUrl: "",
+  elsevierKey: "",
+  elsevierInstToken: "",
 };
 
 export function getSettings() {
@@ -86,7 +88,7 @@ export function saveSettings(patch) {
   for (const [k, v] of Object.entries(patch)) {
     if (!(k in DEFAULT_SETTINGS)) continue;
     // 前端傳回遮罩過的金鑰代表「不變更」
-    if (/Key$/.test(k) && typeof v === "string" && v.includes("•")) continue;
+    if (/(Key|Token)$/.test(k) && typeof v === "string" && v.includes("•")) continue;
     next[k] = v;
   }
   save("settings", next, { secret: true });
@@ -96,5 +98,5 @@ export function saveSettings(patch) {
 const mask = (k) => (k ? `${k.slice(0, 6)}••••${k.slice(-4)}` : "");
 export function publicSettings() {
   const s = getSettings();
-  return { ...s, anthropicKey: mask(s.anthropicKey), openaiKey: mask(s.openaiKey) };
+  return { ...s, anthropicKey: mask(s.anthropicKey), openaiKey: mask(s.openaiKey), elsevierKey: mask(s.elsevierKey), elsevierInstToken: mask(s.elsevierInstToken) };
 }

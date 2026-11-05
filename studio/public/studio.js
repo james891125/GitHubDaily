@@ -143,6 +143,8 @@ async function loadSettings() {
   $("#s-obase").value = s.openaiBase;
   $("#s-omodel").value = s.openaiModel;
   $("#s-webhook").value = s.webhookUrl;
+  $("#s-elskey").value = s.elsevierKey;
+  $("#s-elstoken").value = s.elsevierInstToken;
   toggleProvider();
 }
 function toggleProvider() {
@@ -166,10 +168,14 @@ async function saveSettingsForm() {
     openaiBase: $("#s-obase").value.trim(),
     openaiModel: $("#s-omodel").value.trim(),
     webhookUrl: $("#s-webhook").value.trim(),
+    elsevierKey: $("#s-elskey").value.trim(),
+    elsevierInstToken: $("#s-elstoken").value.trim(),
   });
   setReady(r.ready);
   $("#s-akey").value = r.anthropicKey;
   $("#s-okey").value = r.openaiKey;
+  $("#s-elskey").value = r.elsevierKey;
+  $("#s-elstoken").value = r.elsevierInstToken;
 }
 $("#s-save").addEventListener("click", async () => {
   await saveSettingsForm();
