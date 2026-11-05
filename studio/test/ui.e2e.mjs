@@ -1,15 +1,12 @@
-// 瀏覽器端到端測試：用真的瀏覽器操作每個分頁、上傳各種檔案、從介面執行每一個範本。
-// 執行：npm run test:ui（需要已安裝 Playwright：npm i -D playwright && npx playwright install chromium）
-// 所有外部服務（網站、AI、Webhook）都由 test/world.js 模擬，不需要網路與金鑰。
-import { spawn } from "node:child_process";
+// 瀏覽器端到端測試：用真的瀏覽器操作每個頁面，並「從表單」辦理每一項服務。
+// 執行：npm run test:ui（需要 Playwright：npm i -D playwright && npx playwright install chromium）
+// 外部服務（網站、AI、學術 API、Webhook）全部由 test/world.js 模擬，不需網路與金鑰。
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { startWorld } from "./world.js";
+import { startStack, FILES } from "./helpers.js";
 
-const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 let chromium;
 try {
@@ -21,7 +18,6 @@ try {
 
 const SHOTS = process.env.UI_SHOTS || path.join(os.tmpdir(), "studio-ui-shots");
 fs.mkdirSync(SHOTS, { recursive: true });
-const FILES = path.join(here, "files");
 const results = [];
 let failures = 0;
 async function step(name, fn) {
@@ -35,41 +31,18 @@ async function step(name, fn) {
   }
   console.log(results.at(-1));
 }
+const assert = (cond, msg) => {
+  if (!cond) throw new Error(msg || "檢查失敗");
+};
 // 以記憶體中的檔案上傳（保留中文檔名；部分環境的 Playwright 無法處理含中文的「路徑」）
 const fileArg = (name) => ({ name, mimeType: "application/octet-stream", buffer: fs.readFileSync(path.join(FILES, name)) });
-/** 點擊前先清空狀態列，避免讀到上一次的結果 */
-async function clickAndWait(page, button, statusSel) {
-  await page.evaluate((s) => (document.querySelector(s).textContent = ""), statusSel);
-  await page.click(button);
-  await page.waitForFunction((s) => /✅|❌|⏹|已停止/.test(document.querySelector(s)?.textContent || ""), statusSel, { timeout: 30000 });
-  return page.textContent(statusSel);
-}
-const assert = (cond, msg) => {
-  if (!cond) throw new Error(msg);
-};
 
-// ---------- 啟動模擬世界與伺服器 ----------
-const world = await startWorld();
-const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "studio-ui-"));
-const port = 21000 + Math.floor(Math.random() * 20000);
-const BASE = `http://127.0.0.1:${port}`;
-const server = spawn(process.execPath, [path.join(here, "..", "server.js")], {
-  env: { ...process.env, PORT: String(port), STUDIO_DATA_DIR: dataDir, ANTHROPIC_BASE_URL: world.claude.base, ANTHROPIC_API_KEY: "", SCHOLAR_ELSEVIER_BASE: world.scholar.url + "/els", SCHOLAR_CROSSREF_BASE: world.scholar.url + "/cr", SCHOLAR_OPENALEX_BASE: world.scholar.url + "/oa" },
-  stdio: "ignore",
-});
-for (let i = 0; i < 50; i++) {
-  try {
-    await fetch(BASE + "/api/meta");
-    break;
-  } catch {
-    await new Promise((r) => setTimeout(r, 100));
-  }
-}
-
+const S = await startStack();
+const { world, BASE } = S;
 const browser = await chromium.launch();
 const consoleErrors = [];
 async function newPage(opts = {}) {
-  const ctx = await browser.newContext({ viewport: { width: 1300, height: 900 }, acceptDownloads: true, ...opts });
+  const ctx = await browser.newContext({ viewport: { width: 1360, height: 900 }, acceptDownloads: true, ...opts });
   const page = await ctx.newPage();
   page.on("pageerror", (e) => consoleErrors.push(`[pageerror] ${e.message}`));
   page.on("console", (m) => m.type() === "error" && !/favicon|status of (4\d\d|502)/.test(m.text()) && consoleErrors.push(`[console] ${m.text()}`));
@@ -77,274 +50,297 @@ async function newPage(opts = {}) {
   page.setDefaultTimeout(20000);
   return page;
 }
-
 const p = await newPage();
-await p.goto(BASE);
+const go = async (hash) => {
+  await p.goto(BASE + "/" + hash);
+  await p.waitForSelector(".page-title");
+};
 
-// ---------- 首頁與設定 ----------
-await step("首頁：未設定金鑰時顯示提示", async () => {
-  assert(await p.isVisible("#setup-banner"), "應顯示設定提示");
+// ---------------- 首頁與選單 ----------------
+await step("首頁：未設定 AI 時顯示提示；服務清單與選單完整", async () => {
+  await go("#/");
+  assert((await p.textContent("#main")).includes("尚未設定 AI 服務"));
+  const services = (await (await fetch(BASE + "/api/services")).json()).services;
+  assert((await p.locator("#main .data-table tbody tr").count()) >= services.length, "首頁應列出所有服務");
+  assert((await p.locator("#sidebar .sub a").count()) === services.length, "選單應有所有服務");
+  assert((await p.textContent("#ai-status")).includes("尚未設定"));
   await p.screenshot({ path: path.join(SHOTS, "01-home.png") });
 });
+await step("未設定 AI 時辦理需要 AI 的服務：導向系統設定", async () => {
+  await go("#/svc/email-reply");
+  await p.fill("#f-mail", "test");
+  await p.fill("#f-points", "test");
+  await p.click("#svc-submit");
+  await p.waitForFunction(() => location.hash === "#/settings");
+});
+await step("麵包屑與選單：服務頁顯示正確位置、選單展開所屬類別", async () => {
+  await go("#/svc/citation");
+  assert((await p.textContent("#crumbs")).replace(/\s/g, "") === "首頁>學術研究>參考文獻格式產生", await p.textContent("#crumbs"));
+  assert(await p.isVisible("#sidebar a.active:has-text('參考文獻格式產生')"));
+  await p.click("#crumbs a:has-text('學術研究')");
+  await p.waitForFunction(() => document.querySelector(".page-title").textContent === "學術研究");
+});
 
-for (const [label, setup] of [
-  ["Claude", async () => {
+// ---------------- 系統設定 ----------------
+async function setProvider(kind) {
+  await go("#/settings");
+  if (kind === "claude") {
     await p.selectOption("#s-provider", "anthropic");
     await p.fill("#s-akey", "sk-ant-test");
     await p.selectOption("#s-cmodel", "claude-opus-5-5");
-  }],
-  ["OpenAI 相容", async () => {
+  } else {
     await p.selectOption("#s-provider", "openai");
     await p.fill("#s-okey", "sk-test");
     await p.fill("#s-obase", world.openai.base);
     await p.fill("#s-omodel", "mock");
-  }],
-]) {
-  await step(`設定：${label} 測試連線成功、金鑰遮罩顯示`, async () => {
-    await p.click("[data-tab=settings]");
-    await setup();
-    await p.fill("#s-webhook", world.webhook.url);
-    await p.selectOption("#s-cache", "0");
-    const st = await clickAndWait(p, "#s-test", "#s-status");
-    assert(st.includes("✅"), st);
-    const shown = await p.inputValue(label === "Claude" ? "#s-akey" : "#s-okey");
-    assert(shown.includes("•"), "儲存後金鑰應遮罩：" + shown);
-    assert(await p.locator("#key-dot.on").count(), "右上角應顯示已設定");
+  }
+  await p.fill("#s-webhook", world.webhook.url);
+  await p.selectOption("#s-cache", "0");
+  await p.evaluate(() => (document.querySelector("#s-status").textContent = ""));
+  await p.click("#s-test");
+  await p.waitForFunction(() => /連線成功|連線失敗/.test(document.querySelector("#s-status").textContent));
+  return p.textContent("#s-status");
+}
+await step("系統設定：OpenAI 相容服務連線成功", async () => {
+  const st = await setProvider("openai");
+  assert(st.includes("連線成功"), st);
+  assert((await p.inputValue("#s-okey")).includes("•"), "金鑰應遮罩");
+});
+await step("系統設定：Claude 連線成功，標題列顯示模型", async () => {
+  const st = await setProvider("claude");
+  assert(st.includes("連線成功"), st);
+  assert((await p.textContent("#ai-status")).includes("Claude Opus 5.5"), await p.textContent("#ai-status"));
+  await p.screenshot({ path: path.join(SHOTS, "02-settings.png"), fullPage: true });
+});
+
+// ---------------- 檔案管理 ----------------
+await step("檔案管理：一次上傳多種格式（含掃描檔、圖片、空白檔）", async () => {
+  await go("#/files");
+  const names = ["中文報告.pdf", "會議紀錄.docx", "報價單.docx", "庫存.xlsx", "成績.csv", "說明.txt", "頁面.html", "掃描檔.pdf", "截圖.png", "空白.txt"];
+  await p.setInputFiles("#lib-upload", names.map(fileArg));
+  await p.waitForFunction(() => /空白\.txt/.test(document.querySelector("#lib-status")?.textContent || ""), null, { timeout: 30000 });
+  const status = await p.textContent("#lib-status");
+  assert(/「空白\.txt」上傳失敗：檔案是空的/.test(status), status);
+  assert(/「掃描檔\.pdf」上傳完成（掃描檔／圖片，需文字辨識）/.test(status), status);
+  assert((await p.locator("#lib-table tbody tr").count()) === 9, "應有 9 個檔案");
+  assert((await p.locator("#lib-table .st-stop").count()) === 2, "掃描檔與圖片應標示需文字辨識");
+  await p.screenshot({ path: path.join(SHOTS, "03-files.png"), fullPage: true });
+});
+
+// ---------------- 每一項服務（從表單辦理） ----------------
+// 欄位值：字串＝輸入；true/false＝勾選；{ select }；{ upload }；{ library }；{ text }；{ url }
+const site = world.site.url;
+const kbName = "客服資料";
+const cases = {
+  "official-document": { fields: { kind: { select: "函" }, org: "國立測試大學", to: "各學院", content: "函請各學院推薦評審委員。" }, word: true },
+  "meeting-minutes": { fields: { title: "系務會議", doc: { upload: "會議紀錄.docx" } }, word: true },
+  "email-reply": { fields: { mail: "請問能出席嗎？", points: "可以出席", tone: { select: "親切" }, lang: { select: "English" } } },
+  proofread: { fields: { doc: { text: "今天的會義改到明天。" } }, word: true },
+  summarize: { fields: { doc: { url: site + "/about" } }, word: true },
+  compare: { fields: { a: { text: "第一條 會員應繳費。" }, b: { text: "第一條 會員應按時繳費。" } }, expectAi: 0, word: true },
+  "zh-convert": { fields: { doc: { text: "这个软件的网络设置" } }, expectAi: 0, resultHas: "軟體" },
+  "literature-search": { fields: { query: "meshless method", synth: true }, xlsx: true },
+  "literature-review": { fields: { query: "meshless method" }, word: true },
+  "paper-translate": { fields: { doc: { library: "中文報告.pdf" }, full: false }, word: true },
+  citation: { fields: { dois: "10.1016/j.enganabound.2017.10.009", style: { select: "ieee" } }, expectAi: 0, resultHas: "[ieee]" },
+  "research-tracker": { fields: { query: "neural network", notify: true }, webhook: true },
+  ocr: { fields: { file: { library: "掃描檔.pdf" } }, word: true, resultHas: "圖書館開放時間" },
+  translate: { fields: { doc: { library: "說明.txt" }, target: { select: "en" } }, word: true },
+  "extract-table": { fields: { doc: { library: "報價單.docx" }, fields: "項目, 數量, 單價" }, xlsx: true },
+  "data-analysis": { fields: { file: { upload: "成績.csv" } }, word: true },
+  "to-markdown": { fields: { doc: { library: "庫存.xlsx" } }, expectAi: 0, resultHas: "鍵盤" },
+  "site-check": { fields: { url: site, advise: true }, word: true },
+  "page-monitor": { fields: { url: site + "/changing", notify: true }, twice: true, webhook: true },
+  "news-digest": { fields: { feeds: site + "/rss.xml\n" + site + "/atom.xml", days: "3" } },
+  "web-translate": { fields: { url: site + "/en" }, word: true },
+  "web-research": { fields: { question: "大專校院數位學習補助" }, word: true, resultHas: "參考來源" },
+  "site-to-kb": { fields: { url: site + "/docs/", kb: { select: kbName }, include: "/docs/" }, expectAi: 0 },
+};
+
+async function fillField(key, v) {
+  const id = `#f-${key}`;
+  if (typeof v === "boolean") return v ? p.check(id) : p.uncheck(id);
+  if (v.select) {
+    // 依顯示文字（開頭相符）或值選擇，不等待逾時
+    const value = await p.$eval(id, (el, want) => [...el.options].find((o) => o.value === want || o.textContent.startsWith(want))?.value, v.select);
+    if (value === undefined) throw new Error(`選單 ${key} 沒有「${v.select}」`);
+    return p.selectOption(id, value);
+  }
+  const mode = v.upload ? "upload" : v.library ? "library" : v.text !== undefined ? "text" : v.url ? "url" : null;
+  if (mode) {
+    await p.check(`input[name="${key}-mode"][value="${mode}"]`);
+    if (mode === "upload") return p.setInputFiles(id, fileArg(v.upload));
+    if (mode === "library") return p.selectOption(`${id}-lib`, { label: v.library });
+    if (mode === "text") return p.fill(`${id}-text`, v.text);
+    return p.fill(`${id}-url`, v.url);
+  }
+  return p.fill(id, String(v));
+}
+async function submitService() {
+  await p.click("#svc-submit");
+  await p.waitForFunction(() => /辦理完成|已完成檢查|辦理失敗|已停止/.test(document.querySelector("#svc-status")?.textContent || ""), null, { timeout: 40000 });
+  return p.textContent("#svc-status");
+}
+
+// 先建立知識庫（網站匯入知識庫服務要用）
+await step("知識庫：建立新知識庫", async () => {
+  await go("#/kb");
+  await p.fill("#kb-name", kbName);
+  await p.click("#kb-create button[type=submit]");
+  await p.waitForFunction((n) => document.querySelector(".page-title")?.textContent === n, kbName);
+});
+
+const services = (await (await fetch(BASE + "/api/services")).json()).services;
+for (const svc of services) {
+  await step(`服務（表單辦理）：${svc.name}`, async () => {
+    const c = cases[svc.id];
+    assert(c, "測試沒有涵蓋這個服務，請在 cases 補上");
+    await go(`#/svc/${svc.id}`);
+    for (const [k, v] of Object.entries(c.fields)) await fillField(k, v);
+    const hooks = world.webhook.received.length;
+    const aiBefore = world.claude.calls.length;
+    let st = await submitService();
+    if (c.twice) {
+      assert(/條件未成立/.test(st) && /記錄基準/.test(st), "第一次應建立基準：" + st);
+      st = await submitService();
+    }
+    if (!st.includes("辦理完成")) throw new Error(st + " " + (await p.evaluate(() => document.querySelector("#svc-error")?.textContent || "")));
+    assert(!(await p.locator("#svc-result .st-err").count()), "有步驟失敗");
+    assert(!(await p.locator("#svc-result .st-wait").count()), "有步驟停留在等待中");
+    if (c.expectAi === 0) assert(world.claude.calls.length === aiBefore && st.includes("未使用 AI"), "不應呼叫 AI：" + st);
+    else if (svc.ai !== "none") assert(/AI 呼叫 \d+ 次/.test(st), "應顯示 AI 用量：" + st);
+    if (c.webhook) assert(world.webhook.received.length === hooks + 1, "應送出通知");
+    const result = await p.evaluate(() => document.querySelector("#svc-out")?.textContent || "");
+    for (const bad of ["undefined", "[object Object]", "{{", "/api/outputs/"]) assert(!result.includes(bad), `結果含「${bad}」`);
+    if (c.resultHas) assert(result.includes(c.resultHas), `結果應包含「${c.resultHas}」：${result.slice(0, 200)}`);
+    const links = await p.locator("#svc-files a").evaluateAll((as) => as.map((a) => ({ href: a.getAttribute("href"), name: a.getAttribute("download") })));
+    if (c.word) assert(links.some((l) => l.name.endsWith(".docx")), "應產出 Word：" + JSON.stringify(links));
+    if (c.xlsx) assert(links.some((l) => l.name.endsWith(".xlsx")), "應產出 Excel：" + JSON.stringify(links));
+    for (const l of links) {
+      const res = await fetch(BASE + l.href);
+      assert(res.status === 200 && (await res.arrayBuffer()).byteLength > 0, "下載失敗：" + l.name);
+    }
+    await p.screenshot({ path: path.join(SHOTS, `10-svc-${svc.id}.png`), fullPage: true });
   });
 }
-await p.screenshot({ path: path.join(SHOTS, "02-settings.png"), fullPage: true });
 
-// ---------- 檔案庫：上傳各種檔案 ----------
-await step("檔案：一次上傳多種格式，掃描檔與空白檔顯示錯誤提示", async () => {
-  await p.click("[data-tab=files]");
-  const names = ["中文報告.pdf", "會議紀錄.docx", "報價單.docx", "庫存.xlsx", "名單.csv", "筆記.md", "說明.txt", "頁面.html", "掃描檔.pdf", "空白.txt"];
-  // 記錄每一則提示訊息（用 MutationObserver，才不會漏掉很快被覆蓋的訊息）
-  await p.evaluate(() => {
-    window.__toasts = [];
-    new MutationObserver(() => window.__toasts.push(document.querySelector("#toast").textContent)).observe(document.querySelector("#toast"), { childList: true, characterData: true, subtree: true });
-  });
-  await p.setInputFiles("#lib-upload", names.map(fileArg));
-  await p.waitForFunction(() => document.querySelectorAll("#lib-list .item").length >= 8, null, { timeout: 30000 });
-  await p.waitForFunction(() => window.__toasts.some((t) => /空/.test(t)), null, { timeout: 30000 });
-  const toasts = await p.evaluate(() => window.__toasts);
-  const listed = await p.locator("#lib-list .item").count();
-  assert(listed === 8, `應有 8 個成功的檔案，實際 ${listed}`);
-  assert(toasts.some((t) => /掃描|OCR/.test(t)), "掃描檔應提示：" + toasts.join(" | "));
-  assert(toasts.some((t) => /空/.test(t)), "空白檔應提示：" + toasts.join(" | "));
-  await p.screenshot({ path: path.join(SHOTS, "03-files.png") });
+await step("服務：必填欄位未填時顯示錯誤，不送出 AI", async () => {
+  await go("#/svc/official-document");
+  const before = world.claude.calls.length;
+  const st = await submitService();
+  assert(st.includes("辦理失敗"), st);
+  assert((await p.textContent("#svc-error")).includes("請填寫「事由與重點」"));
+  assert(world.claude.calls.length === before);
+});
+await step("服務：設為定期執行，於自訂工作流程中可見", async () => {
+  await go("#/svc/site-check");
+  await fillField("url", site);
+  await p.click("#svc-schedule-btn");
+  await p.fill("#sch-time", "07:30");
+  await p.click("#sch-save");
+  await p.waitForFunction(() => /已建立排程/.test(document.querySelector("#toast").textContent));
+  await go("#/flows");
+  assert((await p.textContent("#main")).includes("網站健康檢查（定期）") && (await p.textContent("#main")).includes("每天 07:30"));
 });
 
-// ---------- 文件工具：每個工具 × 每種來源 ----------
-const docRun = async (src, tool, fill) => {
-  await p.click("[data-tab=docs]");
-  await p.click(`[data-src=${src}]`);
-  await p.click(`[data-tool=${tool}]`);
-  await fill();
-  const st = await clickAndWait(p, "#doc-run", "#doc-status");
-  assert(st.includes("✅"), st);
-  return st;
-};
-await step("文件工具：上傳 PDF → 轉 Markdown（不需 AI）", async () => {
-  const st = await docRun("upload", "convert", () => p.setInputFiles("#doc-file", fileArg("中文報告.pdf")));
-  assert((await p.textContent("#doc-output")).includes("營收成長百分之二十三"), "內容錯誤");
-  assert(await p.locator("#doc-files a").count(), "應有下載連結");
-  assert(st.includes("未使用 AI"), st);
-});
-await step("文件工具：檔案庫的 Word → 翻譯成英文，顯示 AI 用量", async () => {
-  const st = await docRun("library", "translate", async () => {
-    await p.selectOption("#doc-lib", { label: "會議紀錄.docx" });
-    await p.selectOption("#doc-lang", "en");
-  });
-  assert((await p.textContent("#doc-output")).includes("【譯文】"), "沒有譯文");
-  assert(/AI 呼叫 1 次/.test(st), "應顯示用量：" + st);
-});
-await step("文件工具：網址 → 摘要（會議紀錄風格）", async () => {
-  await docRun("url", "summarize", async () => {
-    await p.fill("#doc-url", world.site.url + "/about");
-    await p.selectOption("#doc-style", { index: 2 });
-  });
-  assert((await p.textContent("#doc-output")).includes("AI 回覆"));
-});
-await step("文件工具：貼上文字 → 擷取表格，產生 Excel 與 CSV", async () => {
-  await docRun("text", "extract", async () => {
-    await p.fill("#doc-text", "烏龍茶 350 元，紅茶 280 元");
-    await p.fill("#doc-fields", "品名, 價格");
-  });
-  const links = await p.locator("#doc-files a").allTextContents();
-  assert(links.some((l) => l.includes(".xlsx")) && links.some((l) => l.includes(".csv")), links.join(","));
-  // 下載檔名由連結的 download 屬性與伺服器的 Content-Disposition 決定，兩者都要正確
-  // （這個 headless 瀏覽器版本對非英文檔名一律回報 "download"，所以不使用 suggestedFilename）
-  const link = p.locator("#doc-files a", { hasText: ".xlsx" });
-  assert((await link.getAttribute("download")) === "貼上的文字-擷取.xlsx", "download 屬性：" + (await link.getAttribute("download")));
-  const res = await fetch(BASE + (await link.getAttribute("href")));
-  const cd = res.headers.get("content-disposition");
-  assert(res.status === 200 && cd.includes("filename*=UTF-8''" + encodeURIComponent("貼上的文字-擷取.xlsx")), "Content-Disposition：" + cd);
-  const buf = Buffer.from(await res.arrayBuffer());
-  assert(buf.subarray(0, 2).toString() === "PK", "應為有效的 xlsx（zip）檔");
-  await p.screenshot({ path: path.join(SHOTS, "04-docs.png"), fullPage: true });
-});
-
-// ---------- 網站工具 ----------
-await step("網站檢測：分數、問題清單、各項卡片、AI 建議", async () => {
-  await p.click("[data-tab=web]");
-  await p.click("[data-web=check]");
-  await p.fill("#web-url", world.site.url);
-  const st = await clickAndWait(p, "#web-run", "#web-status");
-  assert(st.includes("✅"), st);
-  assert((await p.locator("#ck-grid .panel").count()) === 7, "應有 7 張卡片");
-  await p.click("#ck-advise");
-  await p.waitForFunction(() => document.querySelector("#ck-ai .markdown")?.textContent.includes("AI 回覆"));
-  await p.screenshot({ path: path.join(SHOTS, "05-web-check.png"), fullPage: true });
-});
-await step("擷取網頁：Big5 編碼的網頁顯示正確中文", async () => {
-  await p.click("[data-web=scrape]");
-  await p.fill("#web-url", world.site.url + "/big5");
-  await clickAndWait(p, "#web-run", "#web-status");
-  assert((await p.textContent("#web-result")).includes("圖書館將於十二月一日"), "Big5 解碼錯誤");
-});
-await step("擷取網頁：被擋的網站顯示可行的解法", async () => {
-  await p.fill("#web-url", world.site.url + "/blocked");
-  const st = await clickAndWait(p, "#web-run", "#web-status");
-  assert(/拒絕程式直接存取/.test(st), st);
-});
-
-// ---------- 知識庫 ----------
-await step("知識庫：建立 → 加入檔案、網頁、文字 → 提問 → 出處與用量", async () => {
-  await p.click("[data-tab=kb]");
-  await p.fill("#kb-new-name", "客服資料");
-  await p.click("#kb-new");
+// ---------------- 知識庫問答 ----------------
+await step("知識庫：加入檔案、網頁、文字後提問，顯示出處與用量", async () => {
+  await go("#/kb");
+  await p.click(`#main a:has-text('${kbName}')`);
   await p.waitForSelector("#kb-file");
-  await p.setInputFiles("#kb-file", fileArg("說明.txt"));
+  await p.setInputFiles("#kb-file", [fileArg("說明.txt")]);
   await p.click("#kb-add-file");
-  await p.waitForFunction(() => document.querySelectorAll(".kb-docs .item").length === 1);
-  await p.fill("#kb-url", world.site.url + "/");
+  await p.waitForFunction(() => /說明\.txt/.test(document.querySelector("#main").textContent) && document.querySelectorAll("[data-del-doc]").length >= 4);
+  await p.fill("#kb-url", site + "/");
   await p.click("#kb-add-url");
-  await p.waitForFunction(() => document.querySelectorAll(".kb-docs .item").length === 2);
+  await p.waitForFunction(() => document.querySelectorAll("[data-del-doc]").length >= 5);
   await p.fill("#kb-text", "會員可享九折優惠。");
   await p.click("#kb-add-text");
-  await p.waitForFunction(() => document.querySelectorAll(".kb-docs .item").length === 3);
+  await p.waitForFunction(() => document.querySelectorAll("[data-del-doc]").length >= 6);
   await p.fill("#kb-q", "退貨期限是幾天？");
   await p.keyboard.press("Enter");
-  await p.waitForSelector(".msg.ai .src");
-  const ans = await p.textContent(".msg.ai:last-child");
-  assert(ans.includes("七天 [1]"), ans);
-  assert(ans.includes("AI 呼叫 1 次"), "應顯示用量：" + ans);
-  await p.click(".msg.ai .src summary");
-  await p.screenshot({ path: path.join(SHOTS, "06-kb.png"), fullPage: true });
-});
-await step("知識庫：問不在資料裡的問題，誠實回答沒有", async () => {
+  await p.waitForSelector(".qa .src");
+  const qa = await p.textContent(".qa:last-child");
+  assert(qa.includes("七天 [1]"), qa);
+  assert(qa.includes("AI 呼叫 1 次"), qa);
   await p.fill("#kb-q", "老闆的名字？");
   await p.click("#kb-ask");
-  await p.waitForFunction(() => document.querySelectorAll(".msg.ai").length >= 2 && !document.querySelector("#kb-ask").disabled);
-  assert((await p.locator(".msg.ai").last().textContent()).includes("沒有相關資訊"));
+  await p.waitForFunction(() => document.querySelectorAll(".qa").length === 2 && !document.querySelector("#kb-ask").disabled);
+  assert((await p.locator(".qa").last().textContent()).includes("沒有相關資訊"));
+  await p.screenshot({ path: path.join(SHOTS, "20-kb.png"), fullPage: true });
 });
 
-// ---------- 工作流：每一個範本從介面執行 ----------
-const meta = await (await fetch(BASE + "/api/meta")).json();
-const templateInputs = {
-  外文文章: { input: world.site.url + "/en" },
-  論文: { file: "中文報告.pdf" },
-  每日簡報: { input: [world.site.url + "/news/1", world.site.url + "/news/2"].join("\n"), webhook: true },
-  健康巡檢: { input: world.site.url, webhook: true },
-  變動監控: { input: world.site.url + "/changing", webhook: true, twice: true },
-  Excel: { file: "報價單.docx" },
-  知識庫: { input: world.site.url + "/docs/", kb: "客服資料" },
-  "API 資料": { input: "demo/repo", patchUrl: world.site.url + "/api/issues" },
-};
-for (const [i, tpl] of meta.templates.entries()) {
-  const key = Object.keys(templateInputs).find((k) => tpl.name.includes(k));
-  const cfg = templateInputs[key];
-  await step(`工作流範本（介面操作）：${tpl.name}`, async () => {
-    assert(cfg, "測試沒有涵蓋這個範本，請補上");
-    await p.click("[data-tab=flows]");
-    await p.click(`[data-tpl="${i}"]`);
-    await p.waitForSelector("#fl-input");
-    // 依需要在介面上選擇檔案、知識庫、開啟通知節點、修改網址
-    if (cfg.file || cfg.kb || cfg.patchUrl) {
-      const node = p.locator(".node").first();
-      await node.locator(".nhead").click();
-      if (cfg.file) await node.locator("select[data-k=fileId]").selectOption({ label: cfg.file });
-    }
-    if (cfg.kb) {
-      const n = p.locator(".node", { has: p.locator("select[data-k=kbId]") });
-      if (!(await n.evaluate((el) => el.classList.contains("open")))) await n.locator(".nhead").click();
-      await n.locator("select[data-k=kbId]").selectOption({ label: cfg.kb });
-    }
-    if (cfg.patchUrl) await p.locator("input[data-k=url]").first().fill(cfg.patchUrl);
-    if (cfg.webhook) await p.locator(".node.disabled [data-op=toggle]").click();
-    if (cfg.input) await p.fill("#fl-input", cfg.input);
-    const hooks = world.webhook.received.length;
-    const runOnce = () => clickAndWait(p, "#fl-run", "#fl-status");
-    let st = await runOnce();
-    if (cfg.twice) {
-      assert(st.includes("⏹"), "第一次應只記錄基準：" + st);
-      st = await runOnce();
-    }
-    assert(st.includes("✅"), st);
-    assert(!(await p.locator(".node.error").count()), "有節點失敗");
-    if (cfg.webhook) assert(world.webhook.received.length === hooks + 1, "應送出一則通知");
-    const out = await p.textContent("#fl-output");
-    for (const bad of ["undefined", "[object Object]", "{{", "/api/outputs/"]) assert(!out.includes(bad), `輸出含「${bad}」：${out.slice(0, 120)}`);
-    await p.screenshot({ path: path.join(SHOTS, `07-flow-${i}.png`), fullPage: true });
-  });
-}
-
-await step("工作流編輯器：新增節點、上下移動、停用、匯出、刪除", async () => {
-  await p.click("#flow-new");
-  await p.waitForSelector("#fl-nodes .node");
-  await p.click("summary:has-text('新增節點')");
-  await p.click("[data-add=fetch_url]");
-  assert(await p.isVisible("[data-add=save_file]"), "新增一個節點後，選單應維持展開");
-  await p.click("[data-add=save_file]");
-  assert((await p.locator("#fl-nodes .node").count()) === 3, "應有 3 個節點");
-  await p.locator("#fl-nodes .node").nth(1).locator("[data-op=up]").click();
-  const first = await p.locator("#fl-nodes .node .ntitle").first().textContent();
-  assert(first.includes("擷取網頁"), "上移失敗：" + first);
-  await p.locator("#fl-nodes .node").nth(2).locator("[data-op=toggle]").click();
-  assert(await p.locator("#fl-nodes .node.disabled").count(), "停用失敗");
+// ---------------- 自訂工作流程 ----------------
+await step("自訂工作流程：從範本建立 → 新增步驟 → 調整順序 → 停用 → 執行 → 匯出 → 刪除", async () => {
+  await go("#/flows");
+  await p.click("[data-tpl='0']");
+  await p.waitForSelector("#fl-nodes");
+  const count = () => p.locator("#fl-nodes tr.node-row").count();
+  const n0 = await count();
+  await p.selectOption("#fl-add-type", "convert_zh");
+  await p.click("#fl-add");
+  assert((await count()) === n0 + 1, "新增步驟失敗");
+  assert(await p.isVisible("#fl-nodes .node-detail"), "新增的步驟應展開設定");
+  assert((await p.inputValue("#fl-add-type")) === "convert_zh", "新增後選單應保留選擇");
+  await p.locator("#fl-nodes tr.node-row").nth(n0).locator("[data-op=up]").click();
+  assert((await p.locator("#fl-nodes tr.node-row").nth(n0 - 1).textContent()).includes("繁簡轉換"), "上移失敗");
+  await p.locator("#fl-nodes tr.node-row").nth(n0 - 1).locator("[data-op=toggle]").click();
+  assert(await p.locator("#fl-nodes tr.node-row.disabled").count(), "停用失敗");
+  await p.fill("#fl-input", site + "/en");
+  await p.click("#fl-run");
+  await p.waitForFunction(() => /執行完成|執行失敗|已停止/.test(document.querySelector("#fl-status").textContent), null, { timeout: 30000 });
+  const st = await p.textContent("#fl-status");
+  assert(st.includes("執行完成") && /AI 呼叫/.test(st), st);
+  assert(await p.locator("#fl-files a").count(), "應有產出檔案");
   const dl = p.waitForEvent("download");
   await p.click("#fl-export");
   const exported = JSON.parse(fs.readFileSync(await (await dl).path(), "utf8"));
-  assert(exported.name === "新的工作流" && exported.nodes.length === 3 && !exported.id, "匯出內容錯誤：" + JSON.stringify(exported).slice(0, 200));
+  assert(exported.nodes.length === n0 + 1 && !exported.id, "匯出內容錯誤");
+  await p.screenshot({ path: path.join(SHOTS, "30-flow.png"), fullPage: true });
   p.once("dialog", (d) => d.accept());
   await p.click("#fl-del");
-  await p.waitForFunction(() => document.querySelector("#flow-panel").textContent.includes("已刪除"));
+  await p.waitForFunction(() => location.hash === "#/flows");
 });
 
-await step("首頁：最近執行與產出檔案、AI 用量統計", async () => {
-  await p.click("[data-tab=home]");
-  await p.waitForSelector("#home-runs .item");
-  assert((await p.locator("#home-outputs .item").count()) > 0);
-  await p.click("[data-tab=settings]");
-  await p.waitForSelector("#usage-box div");
-  const usage = await p.textContent("#usage-box");
-  assert(/今天\d/.test(usage.replace(/[,\s]/g, "")), usage);
+// ---------------- 執行紀錄、首頁統計 ----------------
+await step("執行紀錄：列出辦理紀錄、AI 用量與產出檔案", async () => {
+  await go("#/runs");
+  assert((await p.locator("#main .data-table tbody tr").count()) >= 20);
+  assert((await p.textContent("#main")).includes("公文撰寫"));
+});
+await step("首頁：顯示本月用量與最近辦理紀錄", async () => {
+  await go("#/");
+  const t = await p.textContent(".stat-row");
+  assert(!/本月 AI 呼叫\s*0 次/.test(t), t);
+  assert((await p.textContent("#main")).includes("最近辦理紀錄"));
 });
 
-// ---------- 深色模式與手機寬度 ----------
+// ---------------- 深色模式、手機寬度 ----------------
+const pages = ["#/", "#/svc/official-document", "#/svc/literature-search", "#/kb", "#/flows", "#/runs", "#/files", "#/settings"];
 for (const [label, opts] of [
   ["深色模式", { colorScheme: "dark" }],
   ["手機寬度 390px", { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true }],
 ]) {
-  await step(`${label}：每個分頁都能顯示、沒有橫向捲動`, async () => {
+  await step(`${label}：所有頁面正常顯示、沒有橫向捲動或文字溢出`, async () => {
     const m = await newPage(opts);
-    await m.goto(BASE);
-    for (const tab of ["home", "flows", "kb", "docs", "web", "files", "settings"]) {
-      await m.click(`[data-tab=${tab}]`);
-      await m.waitForTimeout(250);
+    for (const h of pages) {
+      await m.goto(BASE + "/" + h);
+      await m.waitForSelector(".page-title");
+      await m.waitForTimeout(150);
       const overflow = await m.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-      assert(overflow <= 1, `${tab} 頁面橫向超出 ${overflow}px`);
-      // 也檢查卡片內的文字沒有溢出（量文字本身的寬度，元素外框不會因溢出而變寬）
-      if (tab === "settings") await m.selectOption("#s-provider", "openai");
+      assert(overflow <= 1, `${h} 頁面橫向超出 ${overflow}px`);
       const spill = await m.evaluate(() =>
-        [...document.querySelectorAll(".tab.active")].flatMap((box) =>
-          [...box.querySelectorAll("p, label, h2, h3, dd, li, .item, .msg")]
-            .filter((el) => el.offsetParent && getComputedStyle(el).overflowX === "visible" && el.scrollWidth > el.clientWidth + 2)
-            .map((el) => el.textContent.slice(0, 40)),
-        ),
+        [...document.querySelectorAll("#main p, #main label, #main h2, #main .help, #main li")]
+          .filter((el) => el.offsetParent && getComputedStyle(el).overflowX === "visible" && el.scrollWidth > el.clientWidth + 2)
+          .map((el) => el.textContent.slice(0, 40)),
       );
-      assert(!spill.length, `${tab} 有文字超出卡片：${spill.slice(0, 3).join(" | ")}`);
-      await m.screenshot({ path: path.join(SHOTS, `08-${label}-${tab}.png`), fullPage: true });
+      assert(!spill.length, `${h} 有文字溢出：${spill.slice(0, 3).join(" | ")}`);
+      await m.screenshot({ path: path.join(SHOTS, `40-${label}-${h.replace(/[#/]/g, "_")}.png`), fullPage: true });
+    }
+    if (opts.isMobile) {
+      assert(!(await m.isVisible("#sidebar")), "手機版選單預設應收合");
+      await m.click("#menu-toggle");
+      assert(await m.isVisible("#sidebar"), "按「功能選單」應展開");
     }
     await m.context().close();
   });
@@ -355,7 +351,6 @@ await step("整個過程沒有任何 JavaScript 錯誤", async () => {
 });
 
 await browser.close();
-server.kill();
-world.close();
+S.close();
 console.log(`\n${results.length - failures} 通過，${failures} 失敗。截圖：${SHOTS}`);
 process.exit(failures ? 1 : 0);

@@ -3,205 +3,34 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AI 工作坊</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧪</text></svg>" />
-  <link rel="stylesheet" href="/base.css" />
-  <link rel="stylesheet" href="/studio.css" />
+  <title>AI 辦公服務平台</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%231f3d63'/><text x='16' y='22' font-size='16' text-anchor='middle' fill='white' font-family='sans-serif'>AI</text></svg>" />
+  <link rel="stylesheet" href="/admin.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">🧪 <b>AI 工作坊</b><span class="sub">工作流自動化 · 知識庫問答 · 文件處理 · 網站檢測與爬蟲</span></div>
-    <nav id="tabs">
-      <button data-tab="home" class="active">🏠 首頁</button>
-      <button data-tab="flows">⚡ 工作流</button>
-      <button data-tab="kb">📚 知識庫問答</button>
-      <button data-tab="docs">📄 文件工具</button>
-      <button data-tab="web">🌐 網站工具</button>
-      <button data-tab="files">📁 檔案</button>
-      <button data-tab="settings">⚙️ 設定 <span id="key-dot" class="dot"></span></button>
-    </nav>
+  <a href="#main" class="hidden">跳到主要內容</a>
+  <header class="sys-header">
+    <div class="inner">
+      <div class="sys-title">
+        <a href="#/">AI 辦公服務平台</a>
+        <span>開源工具整合・常用流程線上辦理</span>
+      </div>
+      <div class="sys-user">
+        <span id="today"></span>
+        <a href="#/settings" id="ai-status" class="ai-status off">AI：尚未設定</a>
+        <button class="menu-toggle" id="menu-toggle" aria-label="功能選單">功能選單</button>
+      </div>
+    </div>
   </header>
-
-  <main>
-    <!-- 首頁 -->
-    <section id="tab-home" class="tab active">
-      <div id="setup-banner" class="banner hidden">👋 第一次使用？請先到 <a href="#settings" data-goto="settings">⚙️ 設定</a> 輸入你的 Claude 或 OpenAI 相容 API Key。網站檢測、爬蟲、文件轉 Markdown 不需要金鑰也能用。</div>
-      <div class="quick">
-        <button class="qcard" data-goto="flows"><span>⚡</span><b>建立自動化工作流</b><small>串接擷取、AI、翻譯、表格、通知，並可排程執行</small></button>
-        <button class="qcard" data-goto="kb"><span>📚</span><b>和你的文件對話</b><small>上傳 PDF / Word / 網站，AI 根據內容回答並附出處</small></button>
-        <button class="qcard" data-goto="docs"><span>📄</span><b>翻譯、摘要、擷取表格</b><small>長文件分段翻譯成繁中，或抽出資料成 Excel</small></button>
-        <button class="qcard" data-goto="web"><span>🌐</span><b>檢測網站、爬取內容</b><small>SSL、安全標頭、SEO、失效連結評分，整站轉 Markdown</small></button>
-      </div>
-      <div class="two-col">
-        <div class="panel"><h3>最近執行的工作流</h3><div id="home-runs" class="list"></div></div>
-        <div class="panel"><h3>最近產出的檔案</h3><div id="home-outputs" class="list"></div></div>
-      </div>
-    </section>
-
-    <!-- 工作流 -->
-    <section id="tab-flows" class="tab">
-      <div class="split">
-        <aside>
-          <h3>我的工作流</h3>
-          <div id="flow-list" class="wf-list"></div>
-          <button id="flow-new" class="primary full">＋ 空白工作流</button>
-          <h3>從範本建立</h3>
-          <div id="tpl-list" class="wf-list"></div>
-        </aside>
-        <div class="run-panel" id="flow-panel">
-          <p class="hint">從左側選擇一個工作流，或從範本建立。工作流會依序執行每個節點，前一個節點的輸出會存成變數（例如 <code>{{page}}</code>），給後面的節點使用。</p>
-        </div>
-      </div>
-    </section>
-
-    <!-- 知識庫 -->
-    <section id="tab-kb" class="tab">
-      <div class="split">
-        <aside>
-          <h3>知識庫</h3>
-          <div id="kb-list" class="wf-list"></div>
-          <div class="row"><input id="kb-new-name" placeholder="新知識庫名稱" /><button id="kb-new" class="primary">建立</button></div>
-        </aside>
-        <div class="run-panel" id="kb-panel"><p class="hint">建立或選擇一個知識庫，加入文件後即可提問。</p></div>
-      </div>
-    </section>
-
-    <!-- 文件工具 -->
-    <section id="tab-docs" class="tab">
-      <div class="panel">
-        <h2>📄 文件工具</h2>
-        <div class="source-picker">
-          <div class="seg" id="doc-src-seg">
-            <button data-src="upload" class="on">上傳檔案</button>
-            <button data-src="library">檔案庫</button>
-            <button data-src="url">網址</button>
-            <button data-src="text">貼上文字</button>
-          </div>
-          <div data-src-pane="upload"><input type="file" id="doc-file" /><p class="hint">支援 PDF、Word (.docx)、Excel (.xlsx)、CSV、HTML、Markdown、TXT，上限 30 MB。上傳的檔案會存進檔案庫。</p></div>
-          <div data-src-pane="library" class="hidden"><select id="doc-lib"></select></div>
-          <div data-src-pane="url" class="hidden"><input id="doc-url" placeholder="https://…" /></div>
-          <div data-src-pane="text" class="hidden"><textarea id="doc-text" rows="6" placeholder="貼上要處理的文字"></textarea></div>
-        </div>
-        <div class="seg tools" id="doc-tool-seg">
-          <button data-tool="convert" class="on">🔄 轉成 Markdown</button>
-          <button data-tool="translate">🌏 翻譯</button>
-          <button data-tool="summarize">📝 摘要</button>
-          <button data-tool="extract">📊 擷取成表格</button>
-        </div>
-        <div data-tool-pane="convert"><p class="hint">把檔案轉成乾淨的 Markdown 文字（不需 API Key）。</p></div>
-        <div data-tool-pane="translate" class="hidden">
-          <div class="row"><label>目標語言</label><select id="doc-lang" style="width:auto"></select></div>
-          <label>術語表（選填，每行「原文 = 譯文」）</label><textarea id="doc-glossary" rows="2" placeholder="Large Language Model = 大型語言模型"></textarea>
-        </div>
-        <div data-tool-pane="summarize" class="hidden">
-          <div class="row">
-            <label>風格</label><select id="doc-style" style="width:auto"><option>重點條列</option><option>主管簡報（結論先行）</option><option>會議紀錄（決議與待辦）</option><option>白話解說（給非專業讀者）</option><option>學術摘要（研究目的、方法、結果、結論）</option></select>
-            <label>長度</label><select id="doc-length" style="width:auto"><option>簡短</option><option selected>中等</option><option>詳細</option></select>
-          </div>
-        </div>
-        <div data-tool-pane="extract" class="hidden">
-          <label>要擷取的欄位（逗號分隔，留空由 AI 判斷）</label><input id="doc-fields" placeholder="例如：公司名稱, 聯絡人, 電話, Email" />
-          <label>條件（選填）</label><input id="doc-instr" placeholder="例如：只要金額大於 1 萬的項目" />
-        </div>
-        <div class="row"><button id="doc-run" class="primary">▶ 開始處理</button><button id="doc-stop" class="hidden">■ 停止</button><span id="doc-status" class="hint"></span></div>
-        <div id="doc-progress" class="progress hidden"><div></div></div>
-        <div id="doc-files" class="files"></div>
-        <div id="doc-output" class="markdown output"></div>
-      </div>
-    </section>
-
-    <!-- 網站工具 -->
-    <section id="tab-web" class="tab">
-      <div class="panel">
-        <div class="seg" id="web-seg">
-          <button data-web="check" class="on">🩺 網站檢測</button>
-          <button data-web="scrape">📰 擷取網頁</button>
-          <button data-web="crawl">🕷️ 爬取網站</button>
-        </div>
-        <div class="row"><input id="web-url" placeholder="https://example.com" /><button id="web-run" class="primary">▶ 開始</button><button id="web-stop" class="hidden">■ 停止</button></div>
-        <div data-web-pane="scrape" class="hidden row"><label>模式</label><select id="web-mode" style="width:auto"><option value="article">只取正文（去除選單、廣告）</option><option value="full">整頁</option></select></div>
-        <div data-web-pane="crawl" class="hidden">
-          <div class="row">
-            <label>最多頁數</label><input id="crawl-max" type="number" value="20" style="width:90px" />
-            <label>深度</label><input id="crawl-depth" type="number" value="2" style="width:70px" />
-            <label>只爬網址符合</label><input id="crawl-inc" placeholder="例如 /docs/" style="width:160px" />
-            <label>存入知識庫</label><select id="crawl-kb" style="width:auto"><option value="">（不存）</option></select>
-          </div>
-        </div>
-        <span id="web-status" class="hint"></span>
-        <div id="web-result"></div>
-      </div>
-    </section>
-
-    <!-- 檔案 -->
-    <section id="tab-files" class="tab">
-      <div class="two-col">
-        <div class="panel">
-          <h3>📥 檔案庫（工作流與文件工具可直接使用）</h3>
-          <input type="file" id="lib-upload" multiple />
-          <div id="lib-list" class="list"></div>
-        </div>
-        <div class="panel">
-          <h3>📤 產出檔案</h3>
-          <div id="out-list" class="list"></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 設定 -->
-    <section id="tab-settings" class="tab">
-      <div class="settings">
-        <h2>AI 模型</h2>
-        <p class="hint">金鑰儲存在本機 <code>studio/data/settings.json</code>（權限 600），只會傳給你選擇的 API 供應商。排程工作流需要伺服器端能讀到金鑰，因此存在本機而非瀏覽器。</p>
-        <label>供應商</label>
-        <select id="s-provider">
-          <option value="anthropic">Anthropic Claude（建議）</option>
-          <option value="openai">OpenAI 相容（OpenAI / DeepSeek / Gemini / OpenRouter / Ollama…）</option>
-        </select>
-        <div id="s-claude">
-          <label>Claude API Key</label><input id="s-akey" type="password" autocomplete="off" placeholder="sk-ant-…" />
-          <label>模型</label><select id="s-cmodel"></select>
-          <label>思考深度（effort）</label>
-          <select id="s-effort"><option value="">預設</option><option value="low">low（最快、最省）</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh（最仔細）</option></select>
-        </div>
-        <div id="s-openai" class="hidden">
-          <label>API Key（本機 Ollama 可留空）</label><input id="s-okey" type="password" autocomplete="off" placeholder="sk-…" />
-          <label>Base URL</label><input id="s-obase" placeholder="https://api.openai.com/v1" />
-          <p class="hint">DeepSeek：https://api.deepseek.com/v1 · Gemini：https://generativelanguage.googleapis.com/v1beta/openai · OpenRouter：https://openrouter.ai/api/v1 · Ollama：http://localhost:11434/v1</p>
-          <label>模型名稱</label><input id="s-omodel" placeholder="gpt-4o-mini / deepseek-chat / gemini-2.0-flash / llama3.1" />
-        </div>
-        <h2>用量控管</h2>
-        <label>用量模式</label>
-        <select id="s-mode">
-          <option value="economy">省用量（建議）：翻譯、擷取等機械性工作使用較低思考深度</option>
-          <option value="quality">品質優先：所有工作都使用上方設定的思考深度</option>
-        </select>
-        <label>AI 回應快取</label>
-        <select id="s-cache">
-          <option value="0">不快取</option>
-          <option value="1">1 天</option>
-          <option value="7">7 天（建議）</option>
-          <option value="30">30 天</option>
-        </select>
-        <p class="hint">同樣的內容與提示在快取期間內重跑時，直接使用上次的結果，不再呼叫 API（不收費）。</p>
-        <div id="usage-box" class="usage-box"></div>
-        <div class="row"><button id="s-clear-cache" class="small">清除快取</button></div>
-        <h2>學術論文（選填）</h2>
-        <p class="hint">ScienceDirect 等期刊網站會擋程式直接擷取。遇到論文網址時，程式會改用 Crossref / OpenAlex 取得摘要與開放取用全文（免金鑰）。若填入 Elsevier API Key（到 <a href="https://dev.elsevier.com/" target="_blank" rel="noopener">dev.elsevier.com</a> 免費申請），在有訂閱的學校／機構網路下可取得 Elsevier 論文全文。</p>
-        <label>Elsevier API Key</label><input id="s-elskey" type="password" autocomplete="off" />
-        <label>Elsevier Institution Token（選填，校外使用時由圖書館提供）</label><input id="s-elstoken" type="password" autocomplete="off" />
-        <h2>通知</h2>
-        <label>預設 Webhook 網址（Slack / Discord / Teams）</label>
-        <input id="s-webhook" placeholder="https://hooks.slack.com/services/… 或 https://discord.com/api/webhooks/…" />
-        <div class="row">
-          <button id="s-save" class="primary">💾 儲存</button>
-          <button id="s-test">🔌 測試 AI 連線</button>
-          <span id="s-status" class="hint"></span>
-        </div>
-      </div>
-    </section>
-  </main>
-  <div id="toast" class="toast hidden"></div>
-  <script type="module" src="/studio.js"></script>
+  <div class="crumb-bar"><nav class="crumbs" id="crumbs" aria-label="目前位置"></nav></div>
+  <div class="layout">
+    <nav class="sidebar" id="sidebar" aria-label="功能選單"></nav>
+    <main class="content" id="main" tabindex="-1"></main>
+  </div>
+  <footer class="sys-footer">
+    資料、金鑰與產出檔案皆儲存於本機（studio/data），僅在使用 AI 時將處理內容傳送給您設定的 AI 服務。
+  </footer>
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>
