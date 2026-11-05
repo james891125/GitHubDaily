@@ -159,7 +159,10 @@ const routes = {
   // ---- 網站 ----
   "POST /api/web/scrape": async (req, res) => {
     const b = await body(req);
-    const p = await scrapePage(b.url, { mode: b.mode });
+    // 對方網站的問題（被擋、連不上、格式不符）回 502，與本程式的錯誤區分
+    const p = await scrapePage(b.url, { mode: b.mode }).catch((e) => {
+      throw Object.assign(e, { status: e.status || 502 });
+    });
     const file = writeOutput(`${new URL(p.url).hostname}.md`, `# ${p.title}\n\n來源：${p.url}\n\n${p.markdown}`);
     json(res, 200, { ...p, files: [file] });
   },
@@ -266,7 +269,9 @@ const server = http.createServer(async (req, res) => {
       const p = outputPath(decodeURIComponent(url.pathname.slice("/api/outputs/".length)));
       if (!p) return json(res, 404, { error: "檔案不存在" });
       const name = path.basename(p).replace(/^\d+_/, "");
-      res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(name)}` });
+      // filename 給舊瀏覽器的 ASCII 備援；filename* 為完整中文檔名
+      const ascii = name.replace(/[^\x20-\x7e]/g, "_").replace(/"/g, "");
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}` });
       return fs.createReadStream(p).pipe(res);
     }
     const handler = routes[`${req.method} ${url.pathname}`];

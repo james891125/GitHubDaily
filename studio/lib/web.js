@@ -30,18 +30,18 @@ export function htmlToMarkdown(html) {
 
 export function normalizeUrl(u) {
   let s = String(u || "").trim();
-  if (!s) throw new Error("請輸入網址");
+  if (!s) throw Object.assign(new Error("請輸入網址"), { status: 400 });
   if (!/^https?:\/\//i.test(s)) s = "https://" + s;
   let url;
   try {
     url = new URL(s);
   } catch {
-    throw new Error(`網址格式不正確：${String(u).slice(0, 100)}`);
+    throw Object.assign(new Error(`網址格式不正確：${String(u).slice(0, 100)}`), { status: 400 });
   }
   const h = url.hostname;
   const isIp = /^[\d.]+$/.test(h) || h.startsWith("[");
   if (/\s/.test(String(u).trim()) || !(isIp || h === "localhost" || /^[a-z0-9\u00a1-\uffff-]+(\.[a-z0-9\u00a1-\uffff-]+)+$/i.test(h))) {
-    throw new Error(`網址格式不正確：${String(u).slice(0, 100)}`);
+    throw Object.assign(new Error(`網址格式不正確：${String(u).slice(0, 100)}`), { status: 400 });
   }
   url.hash = "";
   return url;

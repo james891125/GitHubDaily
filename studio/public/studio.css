@@ -92,6 +92,7 @@ code { background: var(--code); padding: 0 4px; border-radius: 4px; font-size: 0
 .row > input:not([type=checkbox]):not([type=file]):not([type=number]):not([style*="width"]),
 .row > textarea { flex: 1; width: auto; min-width: 180px; }
 
+.hint, .usage-note, .vars { overflow-wrap: anywhere; }
 .usage-box { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 8px 0; }
 .usage-box div { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
 .usage-box b { display: block; font-size: 20px; }

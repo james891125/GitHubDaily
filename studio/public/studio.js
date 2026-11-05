@@ -81,7 +81,7 @@ function usageText(u) {
   return `AI 呼叫 ${u.calls} 次${u.cached ? `（另有 ${u.cached} 次使用快取，未計費）` : ""} · ${u.estimated ? "約 " : ""}${tokens} tokens（輸入 ${u.inputTokens.toLocaleString()} / 輸出 ${u.outputTokens.toLocaleString()}）`;
 }
 
-const fileLinks = (files = []) => files.map((f) => `<a href="${esc(f.url)}" download>⬇️ ${esc(f.name.replace(/^\d+_/, ""))}</a>`).join("");
+const fileLinks = (files = []) => files.map((f) => `<a href="${esc(f.url)}" download="${esc(f.name.replace(/^\d+_/, ""))}">⬇️ ${esc(f.name.replace(/^\d+_/, ""))}</a>`).join("");
 const fmtSize = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : n > 1024 ? Math.round(n / 1024) + " KB" : n + " B");
 const fmtTime = (s) => (s ? new Date(s).toLocaleString("zh-TW", { hour12: false }) : "");
 
@@ -136,11 +136,13 @@ tabHooks.home = async () => {
     : `<p class="hint">還沒有執行紀錄。</p>`;
   $("#home-outputs").innerHTML = outs.length ? outs.slice(0, 8).map(outputItem).join("") : `<p class="hint">還沒有產出檔案。</p>`;
 };
-const outputItem = (f) => `<div class="item"><a class="grow" href="${esc(f.url)}" download>${esc(f.name.replace(/^\d+_/, ""))}</a><span class="hint">${fmtSize(f.size)} · ${fmtTime(f.at)}</span></div>`;
+const outputItem = (f) => `<div class="item"><a class="grow" href="${esc(f.url)}" download="${esc(f.name.replace(/^\d+_/, ""))}">${esc(f.name.replace(/^\d+_/, ""))}</a><span class="hint">${fmtSize(f.size)} · ${fmtTime(f.at)}</span></div>`;
 
 // ---------------- 設定 ----------------
+let settingsDirty = false; // 使用者正在編輯時，不要被稍後才回來的資料覆蓋
 async function loadSettings() {
   const s = await api("/api/settings");
+  if (settingsDirty) return loadUsage();
   $("#s-cmodel").innerHTML = META.models.map((m) => `<option value="${m.id}">${esc(m.label)}</option>`).join("");
   $("#s-provider").value = s.provider;
   $("#s-akey").value = s.anthropicKey;
@@ -168,6 +170,9 @@ function setReady(ready) {
   $("#setup-banner").classList.toggle("hidden", ready);
 }
 $("#s-provider").addEventListener("change", toggleProvider);
+$("#tab-settings").addEventListener("input", (e) => {
+  if (e.target.matches("input, select")) settingsDirty = true;
+});
 async function loadUsage() {
   const u = await api("/api/usage");
   const box = (title, x) => `<div>${title}<b>${x.calls.toLocaleString()} 次</b><span class="usage-note">${(x.inputTokens + x.outputTokens).toLocaleString()} tokens · 快取省下 ${x.cached} 次</span></div>`;
@@ -193,6 +198,7 @@ async function saveSettingsForm() {
     cacheDays: Number($("#s-cache").value),
   });
   setReady(r.ready);
+  settingsDirty = false;
   $("#s-akey").value = r.anthropicKey;
   $("#s-okey").value = r.openaiKey;
   $("#s-elskey").value = r.elsevierKey;
@@ -432,6 +438,7 @@ async function runCheck(url, out) {
 
 // ---------------- 知識庫 ----------------
 let currentKb = null;
+let kbAddOpen = false; // 加入文件後，「文件」區塊維持展開，方便連續加入
 const chatHistory = {};
 async function renderKbList() {
   const kbs = await api("/api/kb");
@@ -457,13 +464,14 @@ $("#kb-new").addEventListener("click", async () => {
 });
 
 async function openKb(id) {
+  if (currentKb !== id) kbAddOpen = false;
   currentKb = id;
   await renderKbList();
   const k = await api("/api/kb/detail?id=" + id);
   chatHistory[id] ||= [];
   $("#kb-panel").innerHTML = `
     <div class="row" style="justify-content:space-between"><h2 style="margin:0">📚 ${esc(k.name)}</h2><button class="small" id="kb-del">刪除知識庫</button></div>
-    <details ${k.docs.length ? "" : "open"}><summary><b>文件（${k.docs.length}）</b>　<span class="hint">共 ${k.chunks} 個段落</span></summary>
+    <details id="kb-docs-box" ${!k.docs.length || kbAddOpen ? "open" : ""}><summary><b>文件（${k.docs.length}）</b>　<span class="hint">共 ${k.chunks} 個段落</span></summary>
       <div class="list kb-docs">${k.docs.map((d) => `<div class="item"><span class="grow">${esc(d.title)} <span class="hint">${d.chars.toLocaleString()} 字 · ${d.chunks} 段${d.source ? ` · ${esc(d.source)}` : ""}</span></span><button class="small" data-del-doc="${d.id}">移除</button></div>`).join("") || `<p class="hint">還沒有文件，請從下方加入。</p>`}</div>
       <div class="row">
         <input type="file" id="kb-file" multiple style="flex:1" />
@@ -494,7 +502,8 @@ async function openKb(id) {
   const add = async (payload, label) => {
     status(`加入 ${label}…`);
     try {
-      const r = await post("/api/kb/docs", { kbId: id, ...payload });
+      kbAddOpen = true;
+    const r = await post("/api/kb/docs", { kbId: id, ...payload });
       status(`✅ ${label}：切成 ${r.chunks} 段`);
       return true;
     } catch (e) {
@@ -580,6 +589,7 @@ let FLOWS = [];
 let editing = null; // 正在編輯的工作流（物件副本）
 let flowAbort = null;
 let KBS = [];
+let addMenuOpen = false; // 「新增節點」選單在重新繪製後維持展開
 
 tabHooks.flows = async () => {
   [FLOWS, KBS] = await Promise.all([api("/api/flows"), api("/api/kb"), refreshFiles()]);
@@ -596,6 +606,7 @@ $("#tab-flows aside").addEventListener("click", async (e) => {
   const f = e.target.closest("[data-flow]");
   const t = e.target.closest("[data-tpl]");
   if (f) {
+    addMenuOpen = false;
     editing = structuredClone(FLOWS.find((x) => x.id === f.dataset.flow));
     renderFlowList();
     renderEditor();
@@ -679,7 +690,7 @@ function renderEditor() {
     </div>
     <h3>節點</h3>
     <div id="fl-nodes">${f.nodes.map((n, i) => nodeHtml(n, i) + `<div class="arrow">↓</div>`).join("")}</div>
-    <details><summary><b>＋ 新增節點</b></summary><div class="add-node">${Object.entries(META.nodeTypes).map(([k, d]) => `<button class="small" data-add="${k}" title="${esc(d.desc)}">${esc(d.label)}</button>`).join("")}</div></details>
+    <details id="add-node-menu" ${addMenuOpen ? "open" : ""}><summary><b>＋ 新增節點</b></summary><div class="add-node">${Object.entries(META.nodeTypes).map(([k, d]) => `<button class="small" data-add="${k}" title="${esc(d.desc)}">${esc(d.label)}</button>`).join("")}</div></details>
     <div class="sched">
       <label><input type="checkbox" id="sc-on" ${s.enabled ? "checked" : ""} style="width:auto" /> ⏰ 排程自動執行</label>
       <select id="sc-mode" style="width:auto"><option value="daily" ${s.mode === "daily" ? "selected" : ""}>每天</option><option value="interval" ${s.mode === "interval" ? "selected" : ""}>每隔</option></select>
@@ -750,6 +761,7 @@ $("#flow-panel").addEventListener("click", async (e) => {
   }
   if (t.classList.contains("nhead")) return nodeEl.classList.toggle("open");
   if (t.dataset.add) {
+    addMenuOpen = true;
     const type = t.dataset.add;
     const def = META.nodeTypes[type];
     const used = new Set(editing.nodes.map((x) => x.id));

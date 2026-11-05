@@ -275,6 +275,11 @@ describe("文件工具 × 各種檔案", () => {
   test("掃描型 PDF：清楚說明不支援 OCR", async () => {
     await assert.rejects(upload("掃描檔.pdf"), /掃描|OCR/);
   });
+  test("損毀的檔案（副檔名是 .docx 但內容不是）：清楚的錯誤，且不是伺服器錯誤 500", async () => {
+    const res = await fetch(BASE + "/api/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "壞掉.docx", data: Buffer.from("這不是 Word 檔").toString("base64") }) });
+    assert.equal(res.status, 422);
+    assert.match((await res.json()).error, /無法讀取「壞掉\.docx」/);
+  });
   test("空白檔案：清楚的錯誤", async () => {
     await assert.rejects(upload("空白.txt"), /沒有|空/);
   });

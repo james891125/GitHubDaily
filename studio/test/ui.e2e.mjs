@@ -35,6 +35,15 @@ async function step(name, fn) {
   }
   console.log(results.at(-1));
 }
+// 以記憶體中的檔案上傳（保留中文檔名；部分環境的 Playwright 無法處理含中文的「路徑」）
+const fileArg = (name) => ({ name, mimeType: "application/octet-stream", buffer: fs.readFileSync(path.join(FILES, name)) });
+/** 點擊前先清空狀態列，避免讀到上一次的結果 */
+async function clickAndWait(page, button, statusSel) {
+  await page.evaluate((s) => (document.querySelector(s).textContent = ""), statusSel);
+  await page.click(button);
+  await page.waitForFunction((s) => /✅|❌|⏹|已停止/.test(document.querySelector(s)?.textContent || ""), statusSel, { timeout: 30000 });
+  return page.textContent(statusSel);
+}
 const assert = (cond, msg) => {
   if (!cond) throw new Error(msg);
 };
@@ -63,11 +72,11 @@ async function newPage(opts = {}) {
   const ctx = await browser.newContext({ viewport: { width: 1300, height: 900 }, acceptDownloads: true, ...opts });
   const page = await ctx.newPage();
   page.on("pageerror", (e) => consoleErrors.push(`[pageerror] ${e.message}`));
-  page.on("console", (m) => m.type() === "error" && !/favicon/.test(m.text()) && consoleErrors.push(`[console] ${m.text()}`));
+  page.on("console", (m) => m.type() === "error" && !/favicon|status of (4\d\d|502)/.test(m.text()) && consoleErrors.push(`[console] ${m.text()}`));
+  page.on("response", (r) => r.status() >= 500 && r.status() !== 502 && consoleErrors.push(`[HTTP ${r.status()}] ${r.request().method()} ${decodeURIComponent(r.url())}`));
   page.setDefaultTimeout(20000);
   return page;
 }
-const statusDone = (sel) => (p) => p.waitForFunction((s) => /✅|❌|⏹|已停止/.test(document.querySelector(s)?.textContent || ""), sel, { timeout: 30000 });
 
 const p = await newPage();
 await p.goto(BASE);
@@ -96,9 +105,7 @@ for (const [label, setup] of [
     await setup();
     await p.fill("#s-webhook", world.webhook.url);
     await p.selectOption("#s-cache", "0");
-    await p.click("#s-test");
-    await p.waitForFunction(() => /✅|❌/.test(document.querySelector("#s-status").textContent));
-    const st = await p.textContent("#s-status");
+    const st = await clickAndWait(p, "#s-test", "#s-status");
     assert(st.includes("✅"), st);
     const shown = await p.inputValue(label === "Claude" ? "#s-akey" : "#s-okey");
     assert(shown.includes("•"), "儲存後金鑰應遮罩：" + shown);
@@ -111,15 +118,15 @@ await p.screenshot({ path: path.join(SHOTS, "02-settings.png"), fullPage: true }
 await step("檔案：一次上傳多種格式，掃描檔與空白檔顯示錯誤提示", async () => {
   await p.click("[data-tab=files]");
   const names = ["中文報告.pdf", "會議紀錄.docx", "報價單.docx", "庫存.xlsx", "名單.csv", "筆記.md", "說明.txt", "頁面.html", "掃描檔.pdf", "空白.txt"];
-  const toasts = [];
-  const watcher = setInterval(async () => {
-    const t = await p.textContent("#toast").catch(() => "");
-    if (t && !toasts.includes(t)) toasts.push(t);
-  }, 50);
-  await p.setInputFiles("#lib-upload", names.map((n) => path.join(FILES, n)));
+  // 記錄每一則提示訊息（用 MutationObserver，才不會漏掉很快被覆蓋的訊息）
+  await p.evaluate(() => {
+    window.__toasts = [];
+    new MutationObserver(() => window.__toasts.push(document.querySelector("#toast").textContent)).observe(document.querySelector("#toast"), { childList: true, characterData: true, subtree: true });
+  });
+  await p.setInputFiles("#lib-upload", names.map(fileArg));
   await p.waitForFunction(() => document.querySelectorAll("#lib-list .item").length >= 8, null, { timeout: 30000 });
-  await p.waitForTimeout(800);
-  clearInterval(watcher);
+  await p.waitForFunction(() => window.__toasts.some((t) => /空/.test(t)), null, { timeout: 30000 });
+  const toasts = await p.evaluate(() => window.__toasts);
   const listed = await p.locator("#lib-list .item").count();
   assert(listed === 8, `應有 8 個成功的檔案，實際 ${listed}`);
   assert(toasts.some((t) => /掃描|OCR/.test(t)), "掃描檔應提示：" + toasts.join(" | "));
@@ -133,14 +140,12 @@ const docRun = async (src, tool, fill) => {
   await p.click(`[data-src=${src}]`);
   await p.click(`[data-tool=${tool}]`);
   await fill();
-  await p.click("#doc-run");
-  await statusDone("#doc-status")(p);
-  const st = await p.textContent("#doc-status");
+  const st = await clickAndWait(p, "#doc-run", "#doc-status");
   assert(st.includes("✅"), st);
   return st;
 };
 await step("文件工具：上傳 PDF → 轉 Markdown（不需 AI）", async () => {
-  const st = await docRun("upload", "convert", () => p.setInputFiles("#doc-file", path.join(FILES, "中文報告.pdf")));
+  const st = await docRun("upload", "convert", () => p.setInputFiles("#doc-file", fileArg("中文報告.pdf")));
   assert((await p.textContent("#doc-output")).includes("營收成長百分之二十三"), "內容錯誤");
   assert(await p.locator("#doc-files a").count(), "應有下載連結");
   assert(st.includes("未使用 AI"), st);
@@ -167,10 +172,15 @@ await step("文件工具：貼上文字 → 擷取表格，產生 Excel 與 CSV"
   });
   const links = await p.locator("#doc-files a").allTextContents();
   assert(links.some((l) => l.includes(".xlsx")) && links.some((l) => l.includes(".csv")), links.join(","));
-  const dl = p.waitForEvent("download");
-  await p.locator("#doc-files a", { hasText: ".xlsx" }).click();
-  const d = await dl;
-  assert(d.suggestedFilename().endsWith(".xlsx"), "下載檔名：" + d.suggestedFilename());
+  // 下載檔名由連結的 download 屬性與伺服器的 Content-Disposition 決定，兩者都要正確
+  // （這個 headless 瀏覽器版本對非英文檔名一律回報 "download"，所以不使用 suggestedFilename）
+  const link = p.locator("#doc-files a", { hasText: ".xlsx" });
+  assert((await link.getAttribute("download")) === "貼上的文字-擷取.xlsx", "download 屬性：" + (await link.getAttribute("download")));
+  const res = await fetch(BASE + (await link.getAttribute("href")));
+  const cd = res.headers.get("content-disposition");
+  assert(res.status === 200 && cd.includes("filename*=UTF-8''" + encodeURIComponent("貼上的文字-擷取.xlsx")), "Content-Disposition：" + cd);
+  const buf = Buffer.from(await res.arrayBuffer());
+  assert(buf.subarray(0, 2).toString() === "PK", "應為有效的 xlsx（zip）檔");
   await p.screenshot({ path: path.join(SHOTS, "04-docs.png"), fullPage: true });
 });
 
@@ -179,9 +189,8 @@ await step("網站檢測：分數、問題清單、各項卡片、AI 建議", as
   await p.click("[data-tab=web]");
   await p.click("[data-web=check]");
   await p.fill("#web-url", world.site.url);
-  await p.click("#web-run");
-  await statusDone("#web-status")(p);
-  assert((await p.textContent("#web-status")).includes("✅"), await p.textContent("#web-status"));
+  const st = await clickAndWait(p, "#web-run", "#web-status");
+  assert(st.includes("✅"), st);
   assert((await p.locator("#ck-grid .panel").count()) === 7, "應有 7 張卡片");
   await p.click("#ck-advise");
   await p.waitForFunction(() => document.querySelector("#ck-ai .markdown")?.textContent.includes("AI 回覆"));
@@ -190,15 +199,13 @@ await step("網站檢測：分數、問題清單、各項卡片、AI 建議", as
 await step("擷取網頁：Big5 編碼的網頁顯示正確中文", async () => {
   await p.click("[data-web=scrape]");
   await p.fill("#web-url", world.site.url + "/big5");
-  await p.click("#web-run");
-  await statusDone("#web-status")(p);
+  await clickAndWait(p, "#web-run", "#web-status");
   assert((await p.textContent("#web-result")).includes("圖書館將於十二月一日"), "Big5 解碼錯誤");
 });
 await step("擷取網頁：被擋的網站顯示可行的解法", async () => {
   await p.fill("#web-url", world.site.url + "/blocked");
-  await p.click("#web-run");
-  await statusDone("#web-status")(p);
-  assert(/拒絕程式直接存取/.test(await p.textContent("#web-status")), await p.textContent("#web-status"));
+  const st = await clickAndWait(p, "#web-run", "#web-status");
+  assert(/拒絕程式直接存取/.test(st), st);
 });
 
 // ---------- 知識庫 ----------
@@ -207,7 +214,7 @@ await step("知識庫：建立 → 加入檔案、網頁、文字 → 提問 →
   await p.fill("#kb-new-name", "客服資料");
   await p.click("#kb-new");
   await p.waitForSelector("#kb-file");
-  await p.setInputFiles("#kb-file", path.join(FILES, "說明.txt"));
+  await p.setInputFiles("#kb-file", fileArg("說明.txt"));
   await p.click("#kb-add-file");
   await p.waitForFunction(() => document.querySelectorAll(".kb-docs .item").length === 1);
   await p.fill("#kb-url", world.site.url + "/");
@@ -267,11 +274,7 @@ for (const [i, tpl] of meta.templates.entries()) {
     if (cfg.webhook) await p.locator(".node.disabled [data-op=toggle]").click();
     if (cfg.input) await p.fill("#fl-input", cfg.input);
     const hooks = world.webhook.received.length;
-    const runOnce = async () => {
-      await p.click("#fl-run");
-      await statusDone("#fl-status")(p);
-      return p.textContent("#fl-status");
-    };
+    const runOnce = () => clickAndWait(p, "#fl-run", "#fl-status");
     let st = await runOnce();
     if (cfg.twice) {
       assert(st.includes("⏹"), "第一次應只記錄基準：" + st);
@@ -281,7 +284,7 @@ for (const [i, tpl] of meta.templates.entries()) {
     assert(!(await p.locator(".node.error").count()), "有節點失敗");
     if (cfg.webhook) assert(world.webhook.received.length === hooks + 1, "應送出一則通知");
     const out = await p.textContent("#fl-output");
-    for (const bad of ["undefined", "[object Object]", "{{"]) assert(!out.includes(bad), `輸出含「${bad}」`);
+    for (const bad of ["undefined", "[object Object]", "{{", "/api/outputs/"]) assert(!out.includes(bad), `輸出含「${bad}」：${out.slice(0, 120)}`);
     await p.screenshot({ path: path.join(SHOTS, `07-flow-${i}.png`), fullPage: true });
   });
 }
@@ -291,6 +294,7 @@ await step("工作流編輯器：新增節點、上下移動、停用、匯出�
   await p.waitForSelector("#fl-nodes .node");
   await p.click("summary:has-text('新增節點')");
   await p.click("[data-add=fetch_url]");
+  assert(await p.isVisible("[data-add=save_file]"), "新增一個節點後，選單應維持展開");
   await p.click("[data-add=save_file]");
   assert((await p.locator("#fl-nodes .node").count()) === 3, "應有 3 個節點");
   await p.locator("#fl-nodes .node").nth(1).locator("[data-op=up]").click();
@@ -300,7 +304,8 @@ await step("工作流編輯器：新增節點、上下移動、停用、匯出�
   assert(await p.locator("#fl-nodes .node.disabled").count(), "停用失敗");
   const dl = p.waitForEvent("download");
   await p.click("#fl-export");
-  assert((await dl).suggestedFilename().endsWith(".json"));
+  const exported = JSON.parse(fs.readFileSync(await (await dl).path(), "utf8"));
+  assert(exported.name === "新的工作流" && exported.nodes.length === 3 && !exported.id, "匯出內容錯誤：" + JSON.stringify(exported).slice(0, 200));
   p.once("dialog", (d) => d.accept());
   await p.click("#fl-del");
   await p.waitForFunction(() => document.querySelector("#flow-panel").textContent.includes("已刪除"));
@@ -329,6 +334,16 @@ for (const [label, opts] of [
       await m.waitForTimeout(250);
       const overflow = await m.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       assert(overflow <= 1, `${tab} 頁面橫向超出 ${overflow}px`);
+      // 也檢查卡片內的文字沒有溢出（量文字本身的寬度，元素外框不會因溢出而變寬）
+      if (tab === "settings") await m.selectOption("#s-provider", "openai");
+      const spill = await m.evaluate(() =>
+        [...document.querySelectorAll(".tab.active")].flatMap((box) =>
+          [...box.querySelectorAll("p, label, h2, h3, dd, li, .item, .msg")]
+            .filter((el) => el.offsetParent && getComputedStyle(el).overflowX === "visible" && el.scrollWidth > el.clientWidth + 2)
+            .map((el) => el.textContent.slice(0, 40)),
+        ),
+      );
+      assert(!spill.length, `${tab} 有文字超出卡片：${spill.slice(0, 3).join(" | ")}`);
       await m.screenshot({ path: path.join(SHOTS, `08-${label}-${tab}.png`), fullPage: true });
     }
     await m.context().close();

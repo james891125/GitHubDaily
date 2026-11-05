@@ -84,12 +84,22 @@ async function xlsxToText(buf) {
  * @param {Buffer} buf
  * @returns {Promise<{text:string, kind:string, pages?:number}>}
  */
+const userError = (msg) => Object.assign(new Error(msg), { status: 422 });
+
 export async function parseDocument(filename, buf) {
-  if (!buf?.length) throw new Error("檔案是空的，沒有可處理的內容");
-  const r = await parseDocumentInner(filename, buf);
+  if (!buf?.length) throw userError("檔案是空的，沒有可處理的內容");
+  let r;
+  try {
+    r = await parseDocumentInner(filename, buf);
+  } catch (e) {
+    if (e.status) throw e;
+    // 檔案損毀或格式不符（例如副檔名是 .docx 但其實不是 Word 檔）
+    if (/不支援|掃描|OCR/.test(e.message)) throw userError(e.message);
+    throw userError(`無法讀取「${filename}」：檔案可能已損毀、有密碼保護，或副檔名與實際格式不符（${e.message.slice(0, 80)}）`);
+  }
   // Windows 的換行是 \r\n，統一成 \n，才能正確分段
   r.text = r.text.replace(/\r\n?/g, "\n");
-  if (!r.text.replace(/<!--.*?-->/g, "").trim()) throw new Error("檔案中沒有可擷取的文字內容");
+  if (!r.text.replace(/<!--.*?-->/g, "").trim()) throw userError("檔案中沒有可擷取的文字內容");
   return r;
 }
 

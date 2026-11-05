@@ -465,7 +465,8 @@ async function runFlowInner(flow, { input = "", emit = () => {}, signal, setting
         const out = await runNode(node, vars, ctx);
         const varName = node.out ?? NODE_TYPES[node.type]?.out;
         if (varName && out !== undefined) vars[varName] = out;
-        if (out !== undefined) lastOutput = out;
+        // 最終輸出顯示「最後一個有內容的結果」，略過輸出檔案、存入知識庫這類只回傳狀態的節點
+        if (out !== undefined && !["file"].includes(out?.__type) && !["save_file", "kb_add"].includes(node.type)) lastOutput = out;
         record({ type: "node-done", node: node.id, index: i, var: varName, preview: stringify(out).slice(0, 1500) });
       } catch (e) {
         if (e instanceof StopFlow) {
