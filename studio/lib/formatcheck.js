@@ -190,7 +190,8 @@ function analyse(documentXml, stylesXml, settingsXml) {
       inSdt: !!b.inSdt,
     });
   }
-  const updateFields = /<w:updateFields\b[^>]*w:val="(true|1)"/.test(settingsXml || "");
+  // <w:updateFields/>（沒有 w:val）在 Word 中也視為開啟
+  const updateFields = /<w:updateFields\b(?![^>]*w:val="(false|0)")[^>]*\/?>/.test(settingsXml || "");
   return { items, updateFields, st };
 }
 
@@ -218,7 +219,7 @@ export function checkReport(analysis, profile = "auto") {
   const refStart = items.findIndex((x) => x.kind === "heading" && /參考文獻|References/i.test(x.text));
   const refEnd = refStart < 0 ? -1 : items.findIndex((x, k) => k > refStart && x.kind === "heading");
   const inRefs = (k) => refStart >= 0 && k > refStart && (refEnd < 0 || k < refEnd);
-  const body = items.filter((x, k) => x.kind === "para" && x.text && !x.cover && !x.inSdt && !inRefs(k) && !/^(摘要|Abstract|目錄)$/.test(x.text));
+  const body = items.filter((x, k) => x.kind === "para" && x.text && !x.cover && !x.inSdt && !inRefs(k) && !/^(摘要|Abstract|目錄|圖目錄|表目錄)$/.test(x.text));
 
   // ---- 字型與字級 ----
   const badFont = body.filter((p) => p.runs.some((r) => !fontOk(r.r)));
@@ -408,7 +409,7 @@ function fixStyle(xml, styleId, opts) {
   });
 }
 const CJK = "\\u4e00-\\u9fff";
-function fixText(t) {
+export function fixText(t) {
   return t
     .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
     .replace(new RegExp(`([${CJK}]),(?=\\s*[${CJK}])`, "g"), "$1，")

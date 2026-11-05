@@ -15,6 +15,11 @@ import { checkDocx, fixDocx, resultsToMarkdown } from "./formatcheck.js";
 import * as pdf from "./pdftools.js";
 import { batchImages, IMAGE_FORMATS, IMAGE_INPUT } from "./imagetools.js";
 import { convertWithOffice } from "./formats.js";
+import { translatePdf, bilingualMarkdown } from "./pdftranslate.js";
+import { renderDiagram, svgToPng as diagramPng, diagramPrompt, DIAGRAM_TYPES } from "./diagram.js";
+import { buildReport, docxToMarkdown } from "./reportbuild.js";
+import { mailMerge } from "./mailmerge.js";
+import { checkDocx as checkReportDocx } from "./formatcheck.js";
 import { miniMarkdown } from "../public/mini-md.js";
 import JSZip from "jszip";
 import sharp from "sharp";
@@ -276,6 +281,62 @@ export const NODE_TYPES = {
       filename: { label: "壓縮檔名", type: "text", default: "圖片-{{today}}" },
     },
     out: "images",
+  },
+  pdf_translate: {
+    label: "論文 PDF 對照翻譯",
+    desc: "保留原排版翻譯 PDF：每個段落換成譯文，圖片、表格線、公式維持原樣；可左右對照",
+    fields: {
+      fileId: { label: "PDF 檔", type: "file", default: "" },
+      target: { label: "譯成", type: "select", options: { "zh-TW": "繁體中文", en: "English", ja: "日本語" }, default: "zh-TW" },
+      layout: { label: "版面", type: "select", options: { side: "左右對照（左原文、右譯文）", only: "只有譯文", interleave: "原文頁與譯文頁交錯" }, default: "side" },
+      pages: { label: "頁碼範圍（空白為全部）", type: "text", default: "" },
+      glossary: { label: "術語表（每行「原文=譯名」）", type: "textarea", default: "" },
+      skipRefs: { label: "參考文獻不翻譯", type: "checkbox", default: true },
+      table: { label: "另存原文／譯文對照表（Word）", type: "checkbox", default: false },
+    },
+    out: "pdf",
+  },
+  diagram: {
+    label: "產生圖表",
+    desc: "流程圖、組織圖、心智圖、甘特圖；可直接用簡單寫法繪製，或讓 AI 從文字描述整理",
+    fields: {
+      kind: { label: "圖表類型", type: "select", options: DIAGRAM_TYPES, default: "flow" },
+      source: { label: "內容", type: "textarea", default: "{{input}}" },
+      ai: { label: "內容是文字描述，先由 AI 整理成圖表寫法", type: "checkbox", default: false },
+      chartTitle: { label: "圖表標題（選填）", type: "text", default: "" },
+      direction: { label: "流程圖方向", type: "select", options: { TB: "由上而下", LR: "由左而右" }, default: "TB" },
+      filename: { label: "檔名", type: "text", default: "圖表-{{today}}" },
+    },
+    out: "diagram",
+  },
+  report_build: {
+    label: "報告自動排版",
+    desc: "把草稿排成符合國科會／計畫成果報告格式的 Word：封面、自動目錄、圖表目錄、章節與圖表編號、參考文獻",
+    fields: {
+      fileId: { label: "草稿檔（.docx／.md／.txt，選填）", type: "file", default: "" },
+      text: { label: "或貼上草稿", type: "textarea", default: "" },
+      reportType: { label: "報告類型", type: "select", options: { academic: "學術型（第一章、第一節）", project: "計畫成果型（壹、一、）" }, default: "academic" },
+      reportTitle: { label: "報告標題", type: "text", default: "" },
+      kind: { label: "報告類別", type: "text", default: "期末報告" },
+      number: { label: "計畫編號", type: "text", default: "" },
+      org: { label: "執行機構", type: "text", default: "" },
+      pi: { label: "計畫主持人", type: "text", default: "" },
+      period: { label: "執行期間", type: "text", default: "" },
+      autoNumber: { label: "自動加上章節編號", type: "checkbox", default: true },
+      sortRefs: { label: "參考文獻排序（中文在前、英文在後）", type: "checkbox", default: true },
+    },
+    out: "report",
+  },
+  mail_merge: {
+    label: "合併列印",
+    desc: "Excel／CSV 名單套入 Word 範本，產生每人一份文件（證書、通知單、信封、名牌）",
+    fields: {
+      templateId: { label: "Word 範本", type: "file", default: "" },
+      dataId: { label: "名單（Excel／CSV）", type: "file", default: "" },
+      mode: { label: "產出方式", type: "select", options: { separate: "每人一個 Word 檔（打包 ZIP）", combined: "合併成一個 Word 檔", pdf: "合併成一個 PDF（需安裝 LibreOffice）" }, default: "separate" },
+      filename: { label: "檔名（可用 {{欄位}}）", type: "text", default: "" },
+    },
+    out: "merge",
   },
   webhook: {
     label: "發送通知",
@@ -817,6 +878,87 @@ async function runNode(rawNode, vars, ctx) {
       }
       files.forEach((f) => emit({ type: "file", node: node.id, file: f }));
       return { __type: "files", files, markdown: r.markdown };
+    }
+    case "pdf_translate": {
+      const { meta, buf } = getFileRaw(render(node.fileId, vars));
+      if (meta.ext !== ".pdf") throw Object.assign(new Error("對照翻譯需要 PDF 檔。Word 等文件請使用「文件翻譯」服務"), { status: 422 });
+      if (meta.needsOcr) throw Object.assign(new Error(`「${meta.name}」是掃描檔，沒有文字可翻譯，請先使用「掃描文件文字辨識」服務`), { status: 422 });
+      const r = await translatePdf(buf, { target: node.target || "zh-TW", pages: render(node.pages || "", vars), layout: node.layout || "side", glossary: render(node.glossary || "", vars), skipReferences: node.skipRefs !== false && node.skipRefs !== "", signal, log });
+      const base = meta.name.replace(/\.pdf$/i, "");
+      const label = { side: "對照", only: "譯文", interleave: "交錯對照" }[node.layout || "side"];
+      const files = [writeOutput(`${base}-${label}.pdf`, r.pdf)];
+      if (node.table) files.push(writeOutput(`${base}-對照表.docx`, await markdownToDocx(bilingualMarkdown(r.layout, `${base} 原文／譯文對照`))));
+      files.forEach((f) => emit({ type: "file", node: node.id, file: f }));
+      log(`完成：${r.layout.pages.length} 頁、${r.blocks} 段`);
+      return { __type: "files", files, markdown: `# ${base} 對照翻譯\n\n- 頁數：${r.layout.pages.length} 頁（共 ${r.layout.total} 頁）\n- 翻譯段落：${r.blocks} 段；公式、頁碼${node.skipRefs !== false ? "、參考文獻" : ""}保留原文\n- 版面：${{ side: "左右對照", only: "只有譯文", interleave: "原文頁與譯文頁交錯" }[node.layout || "side"]}\n\n譯文以圖層覆蓋在原段落位置，排版與原文相同；若某段文字較長，字級會自動縮小。` };
+    }
+    case "diagram": {
+      const kind = node.kind || "flow";
+      if (!DIAGRAM_TYPES[kind]) throw Object.assign(new Error(`未知的圖表類型：${kind}`), { status: 400 });
+      let text = stringify(resolveRaw(node.source, vars)).trim();
+      if (!text) throw Object.assign(new Error("請輸入圖表內容"), { status: 400 });
+      if (node.ai) {
+        log("AI 整理圖表內容中…");
+        const r = await generate({ prompt: diagramPrompt(kind, text), light: true, maxTokens: 4000 }, undefined, signal);
+        text = r.text.replace(/^```\w*\n?|```\s*$/g, "").trim();
+      }
+      const title = render(node.chartTitle || "", vars).trim();
+      const svg = renderDiagram(kind, text, { title, direction: node.direction || "TB" });
+      const base = render(node.filename || "圖表", vars).trim() || "圖表";
+      const files = [writeOutput(`${base}.png`, await diagramPng(svg)), writeOutput(`${base}.svg`, svg)];
+      files.forEach((f) => emit({ type: "file", node: node.id, file: f }));
+      log(`已產生${DIAGRAM_TYPES[kind]}（PNG 可直接插入 Word、簡報；SVG 可無損放大）`);
+      return { __type: "files", files, kind, source: text, markdown: `# ${title || DIAGRAM_TYPES[kind]}\n\n已產生 PNG 與 SVG 圖檔（請見「產出檔案」）。\n\n## 圖表內容（可修改後貼回「內容」欄，取消勾選 AI 重新產生，不需再使用 AI）\n\n\`\`\`\n${text}\n\`\`\`` };
+    }
+    case "report_build": {
+      let md = "";
+      let srcName = "草稿";
+      const fid = render(node.fileId || "", vars).trim();
+      if (fid) {
+        const { meta, buf } = getFileRaw(fid);
+        srcName = meta.name.replace(/\.\w+$/, "");
+        if (meta.ext === ".docx") md = await docxToMarkdown(buf);
+        else if ([".doc", ".odt", ".rtf"].includes(meta.ext)) {
+          const conv = await convertWithOffice(buf, meta.ext, "docx");
+          md = conv ? await docxToMarkdown(conv) : getFileText(fid).text;
+        } else md = getFileText(fid).text;
+      } else md = render(node.text || "", vars);
+      if (!md.trim()) throw Object.assign(new Error("請上傳草稿檔或貼上草稿內容"), { status: 400 });
+      const cover = Object.fromEntries(["kind", "number", "org", "pi", "period"].map((k) => [k, render(node[k] || "", vars).trim()]));
+      cover.title = render(node.reportTitle || "", vars).trim();
+      if (!cover.title) cover.title = srcName;
+      const r = await buildReport(md, { type: node.reportType || "academic", cover, autoNumber: node.autoNumber !== false, sortRefs: node.sortRefs !== false });
+      r.log.forEach((l) => log(l));
+      const chk = await checkReportDocx(r.buf, node.reportType || "academic");
+      log(`排版後格式檢查：通過 ${chk.summary.pass} 項、未通過 ${chk.summary.fail} 項、提醒 ${chk.summary.warn} 項`);
+      const f = writeOutput(`${cover.title}.docx`, r.buf);
+      emit({ type: "file", node: node.id, file: f });
+      const fails = chk.results.filter((x) => x.status !== "通過" && x.status !== "資訊");
+      return {
+        __type: "files",
+        files: [f],
+        markdown: `# ${cover.title}\n\n已排版完成，格式檢查：通過 ${chk.summary.pass} 項、未通過 ${chk.summary.fail} 項、提醒 ${chk.summary.warn} 項。\n\n## 處理項目\n\n${r.log.map((l) => "- " + l).join("\n")}\n\n${fails.length ? `## 仍需注意\n\n${fails.map((x) => `- ${x.item}：${x.detail}`).join("\n")}\n\n` : ""}## 開啟檔案時\n\nWord 會詢問「是否更新功能變數」，請按「是」，目錄、圖目錄、表目錄與頁碼就會自動產生。之後新增或刪除圖表，按 Ctrl＋A 再按 F9 即可重新編號。`,
+      };
+    }
+    case "mail_merge": {
+      const t = getFileRaw(render(node.templateId, vars));
+      if (t.meta.ext !== ".docx") throw Object.assign(new Error("範本需要 Word 檔（.docx）"), { status: 422 });
+      const d = getFileRaw(render(node.dataId, vars));
+      if (![".csv", ".xlsx", ".tsv", ".txt"].includes(d.meta.ext)) throw Object.assign(new Error("名單需要 Excel（.xlsx）或 CSV 檔，第一列為欄位名稱"), { status: 422 });
+      const table = await parseTable(d.meta.name, d.buf);
+      const mode = node.mode || "separate";
+      const r = await mailMerge(t.buf, table, { mode: mode === "pdf" ? "combined" : mode, filename: render(node.filename || "", vars), log });
+      const base = t.meta.name.replace(/\.docx$/i, "");
+      let f;
+      if (mode === "pdf") {
+        log("轉成 PDF 中…");
+        const pdfBuf = await convertWithOffice(r.buf, ".docx", "pdf");
+        if (!pdfBuf) throw Object.assign(new Error("轉成 PDF 需要安裝 LibreOffice（免費）。也可以改選「合併成一個 Word 檔」，再用 Word 另存為 PDF"), { status: 422 });
+        f = writeOutput(`${base}-合併列印.pdf`, pdfBuf);
+      } else f = writeOutput(mode === "combined" ? `${base}-合併列印.docx` : `${base}-合併列印.zip`, r.buf);
+      emit({ type: "file", node: node.id, file: f });
+      log(`完成 ${r.count} 份`);
+      return { __type: "files", files: [f], markdown: `# 合併列印結果\n\n- 範本：${t.meta.name}\n- 名單：${d.meta.name}，${r.count} 筆\n- 使用的欄位：${r.fields.join("、")}\n- 產出：${{ separate: "每人一個 Word 檔（ZIP）", combined: "合併成一個 Word 檔", pdf: "合併成一個 PDF" }[mode]}` };
     }
     case "read_file": {
       const { meta, text } = getFileText(render(node.fileId, vars));

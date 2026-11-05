@@ -17,6 +17,20 @@ import { parseExtraFormat, EXTRA_FORMATS } from "./formats.js";
 
 export const SUPPORTED = [".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md", ".markdown", ".html", ".htm", ".json", ...EXTRA_FORMATS];
 
+/** 以 pdf.js 開啟 PDF（含中文 CMap 與標準字型） */
+export async function openPdf(buf) {
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  return pdfjs.getDocument({
+    data: new Uint8Array(buf),
+    cMapUrl: CMAP_URL,
+    cMapPacked: true,
+    standardFontDataUrl: FONT_URL,
+    useSystemFonts: true,
+    isEvalSupported: false,
+    verbosity: 0,
+  }).promise;
+}
+
 async function pdfToText(buf) {
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const task = pdfjs.getDocument({

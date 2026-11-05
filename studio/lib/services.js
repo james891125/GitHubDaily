@@ -11,8 +11,8 @@
 //     speech＝需要語音轉文字服務／imagegen＝需要圖片生成服務
 
 export const CATEGORIES = [
-  { id: "office", name: "文書行政", desc: "公文、會議紀錄、信件、校對、摘要、比對" },
-  { id: "research", name: "學術研究", desc: "文獻搜尋、論文翻譯、文獻回顧、引用格式" },
+  { id: "office", name: "文書行政", desc: "公文、會議紀錄、信件、合併列印、流程圖、校對、摘要、比對" },
+  { id: "research", name: "學術研究", desc: "文獻搜尋、論文對照翻譯、文獻回顧、引用格式、報告排版與格式檢查" },
   { id: "docs", name: "文件與資料", desc: "文字辨識、翻譯、擷取表格、資料分析、格式轉換" },
   { id: "media", name: "影音與圖片", desc: "錄音轉逐字稿、會議錄音整理、圖片分析、AI 生成圖片、簡報講稿" },
   { id: "web", name: "網站與資訊", desc: "網站檢測、網頁監控、新聞摘要、網路研究" },
@@ -169,6 +169,47 @@ export const SERVICES = [
     ],
   },
 
+  {
+    id: "mail-merge",
+    cat: "office",
+    name: "合併列印",
+    desc: "把 Excel／CSV 名單套入 Word 範本，一次產生每人一份的獎狀、證書、通知單、信封、名牌，可輸出個別 Word 檔、合併的 Word 檔或 PDF。",
+    ai: "none",
+    notes: [
+      "在 Word 範本中，於要代入的位置輸入 {{欄位名稱}}（例如「{{姓名}} 同學」），欄位名稱須與名單第一列相同；Word 內建「合併列印」插入的功能變數也可直接使用。",
+      "格式：{{日期|民國}} → 115年3月5日；{{金額|千分位}} → 12,000；{{金額|國字}} → 壹萬貳仟元整。",
+      "代入後保留範本原本的字型與版面；頁首、頁尾、表格中的欄位也會代入。",
+      "合併成 PDF 需要安裝 LibreOffice（免費）；未安裝時可選「合併成一個 Word 檔」再另存為 PDF。",
+    ],
+    fields: [
+      { key: "template", label: "Word 範本（.docx）", type: "file", required: true, accept: ".docx" },
+      { key: "data", label: "名單（.xlsx / .csv）", type: "file", required: true, accept: ".xlsx,.csv" },
+      { key: "mode", label: "產出方式", type: "select", options: { separate: "每人一個 Word 檔（打包成 ZIP）", combined: "合併成一個 Word 檔（方便一次列印）", pdf: "合併成一個 PDF（需安裝 LibreOffice）" }, default: "separate" },
+      { key: "filename", label: "個別檔名", type: "text", default: "{{姓名}}", help: "可使用名單欄位，例如「獎狀-{{姓名}}」；只用於「每人一個 Word 檔」。" },
+    ],
+    nodes: [{ id: "merge", type: "mail_merge", templateId: "{{form.template}}", dataId: "{{form.data}}", mode: "{{form.mode}}", filename: "{{form.filename}}", out: "merge" }],
+  },
+  {
+    id: "diagram",
+    cat: "office",
+    name: "流程圖與組織圖",
+    desc: "產生流程圖、組織圖、心智圖、甘特圖（工作時程），輸出 PNG 與 SVG，可直接放進報告或簡報。可用簡單寫法直接繪製，或用文字描述交給 AI 整理。",
+    ai: "none",
+    notes: [
+      "流程圖：每行「步驟A -> 步驟B」，條件寫成「審核？ -[通過]-> 核發」；以「？」結尾的步驟畫成菱形，「開始」「結束」畫成圓角框。",
+      "組織圖、心智圖：縮排大綱，下一層多縮排兩個空白或用「-」開頭。",
+      "甘特圖：每行「工作項目, 開始日期, 結束日期或天數」，例如「問卷設計, 115/3/1, 3週」，可用「接續」接在上一項之後；以「階段名稱：」分組。",
+      "勾選「AI 整理」時只呼叫 1 次 AI；結果會附上圖表寫法，修改後取消勾選即可重新產生，不再使用 AI。",
+    ],
+    fields: [
+      { key: "kind", label: "圖表類型", type: "select", options: { flow: "流程圖", org: "組織圖", mind: "心智圖", gantt: "甘特圖（工作時程）" }, default: "flow" },
+      { key: "content", label: "內容", type: "textarea", rows: 9, required: true, placeholder: "開始 -> 填寫申請表 -> 主管審核？\n主管審核？ -[同意]-> 會計室核章 -> 結束\n主管審核？ -[退回]-> 填寫申請表" },
+      { key: "ai", label: "內容是文字描述，由 AI 整理（會使用 AI）", type: "checkbox", default: false },
+      { key: "title", label: "圖表標題", type: "text", placeholder: "例：出差申請流程" },
+      { key: "direction", label: "流程圖方向", type: "select", options: { TB: "由上而下", LR: "由左而右" }, default: "TB" },
+    ],
+    nodes: [{ id: "chart", type: "diagram", kind: "{{form.kind}}", source: "{{form.content}}", ai: "{{form.ai}}", chartTitle: "{{form.title}}", direction: "{{form.direction}}", filename: "{{form.title}}", out: "diagram" }],
+  },
   // ======================= 學術研究 =======================
   {
     id: "literature-search",
@@ -624,6 +665,57 @@ export const SERVICES = [
     nodes: [{ id: "survey", type: "survey", fileId: "{{form.file}}", group: "{{form.group}}", reportTitle: "{{form.title}}", ai: "{{form.ai}}", out: "survey" }],
   },
   // ======================= 報告格式檢查 =======================
+  {
+    id: "paper-pdf-translate",
+    cat: "research",
+    name: "論文 PDF 對照翻譯",
+    desc: "保留原本排版翻譯英文論文 PDF：每個段落換成中文，圖片、表格線、公式維持原樣，可左右對照閱讀。另可輸出原文／譯文對照表。",
+    ai: "normal",
+    notes: [
+      "參考 PDFMathTranslate 的做法：只翻譯文字段落，公式、頁碼與參考文獻保留原文。",
+      "段落合併成批次翻譯（每批約 6,000 字一次呼叫），30 頁論文約需 10–20 次呼叫；同一份論文重新產生時使用快取，不重複計費。",
+      "掃描型 PDF 沒有文字層，請先使用「掃描文件文字辨識」服務。",
+      "譯文以圖層覆蓋在原段落位置；若譯文較長，字級會自動縮小。原文仍可在左側對照。",
+    ],
+    fields: [
+      { key: "file", label: "論文 PDF", type: "file", required: true, accept: ".pdf" },
+      { key: "layout", label: "版面", type: "select", options: { side: "左右對照（左原文、右譯文）", only: "只有譯文（保留原排版）", interleave: "原文頁與譯文頁交錯" }, default: "side" },
+      { key: "target", label: "譯成", type: "select", options: { "zh-TW": "繁體中文", en: "English", ja: "日本語" }, default: "zh-TW" },
+      { key: "pages", label: "頁碼範圍（選填）", type: "text", placeholder: "例：1-10（空白為全部，一次最多 100 頁）" },
+      { key: "glossary", label: "術語表（選填）", type: "textarea", rows: 3, placeholder: "meshless method=無網格法\ngroundwater=地下水" },
+      { key: "table", label: "另存原文／譯文對照表（Word）", type: "checkbox", default: false },
+    ],
+    nodes: [{ id: "tr", type: "pdf_translate", fileId: "{{form.file}}", layout: "{{form.layout}}", target: "{{form.target}}", pages: "{{form.pages}}", glossary: "{{form.glossary}}", skipRefs: true, table: "{{form.table}}", out: "pdf" }],
+  },
+  {
+    id: "report-build",
+    cat: "research",
+    name: "報告自動排版",
+    desc: "把報告草稿（Word、Markdown 或直接貼上）排成符合國科會／計畫成果報告格式的 Word 檔：封面、摘要、自動目錄、圖目錄、表目錄、章節編號、圖表編號與交互參照、參考文獻排序與懸掛縮排。",
+    ai: "none",
+    notes: [
+      "不使用 AI，內容不會被改寫；只調整格式、編號與順序。",
+      "章節：以 Word 標題樣式或「#」標示的標題，自動加上「第一章、第一節、一、（一）」（計畫成果型為「壹、一、（一）」）；已有編號的保留。",
+      "圖表：「表2 標題」放在表格上方、「圖3：標題」放在圖的下方（位置錯誤會自動調整），依章重新編號為「表1-1」「圖2-1」，內文中的「如表2所示」會一併更新並連結。",
+      "排版後會自動執行格式檢查並列出結果。開啟 Word 檔時請按「是」更新功能變數，目錄與頁碼就會產生。",
+    ],
+    fields: [
+      { key: "file", label: "草稿檔（.docx / .md / .txt）", type: "file", accept: ".docx,.doc,.odt,.md,.txt" },
+      { key: "text", label: "或直接貼上草稿", type: "textarea", rows: 6, placeholder: "# 緒論\n## 研究背景\n內文……\n\n# 參考文獻\n……" },
+      { key: "type", label: "報告類型", type: "select", options: { academic: "學術型（國科會計畫、研究報告）", project: "計畫成果型（縣市計畫、委託案）" }, default: "academic" },
+      { key: "title", label: "報告標題", type: "text", required: true, placeholder: "例：無網格法於地下水問題之研究" },
+      { key: "kind", label: "報告類別", type: "select", options: { 期末報告: "期末報告", 期中報告: "期中報告", 成果報告: "成果報告", 研究報告: "研究報告", 計畫書: "計畫書" }, default: "期末報告" },
+      { key: "number", label: "計畫編號", type: "text", placeholder: "例：NSTC 114-2221-E-019-001" },
+      { key: "org", label: "執行機構", type: "text" },
+      { key: "pi", label: "計畫主持人", type: "text" },
+      { key: "period", label: "執行期間", type: "text", placeholder: "例：114 年 8 月 1 日至 115 年 7 月 31 日" },
+      { key: "autoNumber", label: "自動加上章節編號", type: "checkbox", default: true },
+      { key: "sortRefs", label: "參考文獻排序（中文在前、英文在後）", type: "checkbox", default: true },
+    ],
+    nodes: [
+      { id: "build", type: "report_build", fileId: "{{form.file}}", text: "{{form.text}}", reportType: "{{form.type}}", reportTitle: "{{form.title}}", kind: "{{form.kind}}", number: "{{form.number}}", org: "{{form.org}}", pi: "{{form.pi}}", period: "{{form.period}}", autoNumber: "{{form.autoNumber}}", sortRefs: "{{form.sortRefs}}", out: "report" },
+    ],
+  },
   {
     id: "report-format-check",
     cat: "research",

@@ -2,7 +2,8 @@
 import { test, before, after, describe } from "node:test";
 import assert from "node:assert/strict";
 import ExcelJS from "exceljs";
-import { startStack, last, cleanCheck, makePdf } from "./helpers.js";
+import { startStack, last, cleanCheck, makePdf, makePaper } from "./helpers.js";
+import { checkDocx } from "../lib/formatcheck.js";
 import { SERVICES } from "../lib/services.js";
 import { parseDocument } from "../lib/docs.js";
 import { spawnSync } from "node:child_process";
@@ -467,6 +468,139 @@ describe("網站與資訊", () => {
     ok(r);
     assert.equal(r.aiCalls, 0);
     assert.equal((await S.api("/api/kb/detail?id=" + kb.id)).docs.length, 3);
+  });
+});
+
+describe("合併列印、圖表、論文對照翻譯、報告排版", () => {
+  before(useClaude);
+  test("合併列印：每人一個 Word（ZIP），檔名可用欄位，不呼叫 API", async () => {
+    const t = await S.upload("獎狀範本.docx");
+    const d = await S.upload("獎狀名單.xlsx");
+    const r = await run("mail-merge", { template: t.id, data: d.id, mode: "separate", filename: "獎狀-{{姓名}}" });
+    ok(r);
+    assert.equal(r.aiCalls, 0);
+    const zip = await JSZip.loadAsync(await S.download(r.files[0]));
+    assert.deepEqual(Object.keys(zip.files).sort(), ["獎狀-李美華.docx", "獎狀-王小明.docx", "獎狀-陳志強.docx"].sort());
+    const one = (await parseDocument("a.docx", await zip.file("獎狀-王小明.docx").async("nodebuffer"))).text.replace(/\*\*/g, "");
+    assert.match(one, /河海工程學系 王小明 同學/);
+    assert.match(one, /壹萬貳仟元整/);
+    assert.match(r.done.output, /3 筆/);
+  });
+  test("合併列印：合併成一個 Word；PDF（有 LibreOffice 時）", async () => {
+    const t = await S.upload("獎狀範本.docx");
+    const d = await S.upload("獎狀名單.xlsx");
+    let r = await run("mail-merge", { template: t.id, data: d.id, mode: "combined" });
+    ok(r);
+    assert.ok(r.files[0].name.endsWith("獎狀範本-合併列印.docx"));
+    r = await run("mail-merge", { template: t.id, data: d.id, mode: "pdf" });
+    if (r.status === "success") assert.equal((await PDFDocument.load(await S.download(r.files[0]))).getPageCount(), 3);
+    else assert.match(r.error.message, /LibreOffice/);
+  });
+  test("合併列印：欄位對不上、範本或名單格式錯誤時清楚說明", async () => {
+    const t = await S.upload("獎狀範本.docx");
+    const csv = await S.upload("名單.csv");
+    let r = await run("mail-merge", { template: t.id, data: csv.id });
+    assert.match(r.error.message, /範本中的欄位在名單中找不到：「系所」/);
+    assert.match(r.error.message, /名單的欄位有：姓名、電話、Email/);
+    r = await run("mail-merge", { template: csv.id, data: csv.id });
+    assert.match(r.error.message, /範本需要 Word 檔/);
+    r = await run("mail-merge", { template: t.id });
+    assert.match(r.error.message, /請填寫「名單/);
+  });
+  test("流程圖：依寫法直接繪製，不呼叫 API；輸出 PNG 與 SVG", async () => {
+    const r = await run("diagram", { kind: "flow", content: "開始 -> 填寫申請表 -> 主管審核？\n主管審核？ -[同意]-> 結束\n主管審核？ -[退回]-> 填寫申請表", title: "請假流程", ai: false });
+    ok(r);
+    assert.equal(r.aiCalls, 0);
+    assert.deepEqual(r.files.map((f) => f.name.replace(/^\d+_/, "")), ["請假流程.png", "請假流程.svg"]);
+    const svg = (await S.download(r.files[1])).toString("utf8");
+    assert.match(svg, /<polygon/);
+    assert.match(svg, /同意/);
+    const m = await sharp(await S.download(r.files[0])).metadata();
+    assert.ok(m.width > 300);
+    assert.match(r.done.output, /```\n開始 -> 填寫申請表/);
+  });
+  test("圖表：勾選 AI 時只呼叫一次，AI 回傳的程式碼區塊會被去除；四種類型", async () => {
+    for (const kind of ["flow", "org", "mind", "gantt"]) {
+      const r = await run("diagram", { kind, content: "請假時先填表，主管核准後送人事室，退回就重填。", ai: true });
+      ok(r);
+      assert.equal(r.aiCalls, 1, kind);
+      assert.ok(!/```\w/.test(r.done.output.split("圖表內容")[1].split("```")[1] || ""), "不應殘留程式碼區塊標記");
+    }
+    const prompt = JSON.stringify(S.world.claude.calls.at(-1).body.messages);
+    assert.match(prompt, /甘特圖/);
+  });
+  test("圖表：寫法錯誤時提示正確格式", async () => {
+    const r = await run("diagram", { kind: "gantt", content: "文獻蒐集, 下個月, 3天" });
+    assert.match(r.error.message, /開始日期「下個月」無法辨識/);
+  });
+  test("論文 PDF 對照翻譯：左右對照、段落批次翻譯、公式與參考文獻不送出", async () => {
+    const f = await S.uploadBuf("paper.pdf", await makePaper(2));
+    const before = S.world.claude.calls.length;
+    const r = await run("paper-pdf-translate", { file: f.id, layout: "side", target: "zh-TW", table: true, glossary: "meshless method=無網格法" });
+    ok(r);
+    const calls = S.world.claude.calls.slice(before);
+    assert.ok(calls.length >= 1 && calls.length <= 3, `批次翻譯，實際 ${calls.length} 次`);
+    const sent = JSON.stringify(calls.map((c) => c.body.messages));
+    assert.match(sent, /meshless method=無網格法/);
+    assert.ok(!/u \( x , t \)/.test(sent), "公式不應送出");
+    assert.ok(!/Iverson/.test(sent), "參考文獻不應送出");
+    const pdf = await PDFDocument.load(await S.download(r.files[0]));
+    assert.equal(pdf.getPageCount(), 2);
+    assert.equal(Math.round(pdf.getPage(0).getWidth()), 1190);
+    assert.ok(r.files[1].name.endsWith("對照表.docx"));
+    assert.match(await docText(r.files[1]), /\| 頁 \| 原文 \| 譯文 \|/);
+    // 同一份論文再做一次：使用快取不重複計費
+    await S.api("/api/settings", { cacheDays: 7 });
+    await run("paper-pdf-translate", { file: f.id, layout: "only" });
+    const n = S.world.claude.calls.length;
+    const again = await run("paper-pdf-translate", { file: f.id, layout: "interleave" });
+    ok(again);
+    assert.equal(S.world.claude.calls.length, n, "第二次應全部使用快取");
+    assert.equal((await PDFDocument.load(await S.download(again.files[0]))).getPageCount(), 4);
+    await S.api("/api/settings", { cacheDays: 0 });
+  });
+  test("論文 PDF 對照翻譯：掃描檔、不是 PDF、頁碼超出範圍", async () => {
+    const scan = await S.upload("掃描檔.pdf");
+    let r = await run("paper-pdf-translate", { file: scan.id });
+    assert.match(r.error.message, /掃描/);
+    const d = await S.upload("會議紀錄.docx");
+    r = await run("paper-pdf-translate", { file: d.id });
+    assert.match(r.error.message, /需要 PDF 檔/);
+    const f = await S.uploadBuf("paper2.pdf", await makePaper(1));
+    r = await run("paper-pdf-translate", { file: f.id, pages: "3-5" });
+    assert.match(r.error.message, /超出範圍（此檔共 1 頁）/);
+  });
+  test("報告自動排版：Markdown 草稿 → 通過格式檢查的 Word，不呼叫 API", async () => {
+    const f = await S.upload("報告草稿.md");
+    const r = await run("report-build", { file: f.id, type: "academic", title: "無網格法研究", kind: "期末報告", number: "NSTC 114-2221-E-019-001", org: "國立臺灣海洋大學", pi: "王大明", autoNumber: true, sortRefs: true });
+    ok(r);
+    assert.equal(r.aiCalls, 0);
+    assert.equal(r.files[0].name.replace(/^\d+_/, ""), "無網格法研究.docx");
+    const buf = await S.download(r.files[0]);
+    const c = await checkDocx(buf);
+    assert.equal(c.summary.fail, 0, JSON.stringify(c.results.filter((x) => x.status === "未通過")));
+    assert.match(r.done.output, /未通過 0 項/);
+    assert.match(r.done.output, /表2 重新編號為 表1-1/);
+    const t = await docText(r.files[0]);
+    assert.match(t, /第一章 緒論/);
+    assert.match(t, /計畫主持人：王大明/);
+  });
+  test("報告自動排版：Word 草稿（保留圖片）、貼上文字、計畫成果型", async () => {
+    const md = (await import("node:fs")).readFileSync(new URL("./files/報告草稿.md", import.meta.url), "utf8");
+    let r = await run("report-build", { text: md.replace(/本研究/g, "本計畫"), type: "project", title: "成果報告", kind: "成果報告", autoNumber: true });
+    ok(r);
+    assert.match(await docText(r.files[0]), /壹、緒論/);
+    const { markdownToDocx } = await import("../lib/docx.js");
+    const png = await sharp({ create: { width: 300, height: 200, channels: 3, background: "#88aacc" } }).png().toBuffer();
+    const draftDocx = await markdownToDocx("# 緒論\n\n本研究結果如圖1。\n\n![](chart:a)\n\n圖1 結果\n\n# 參考文獻\n\nIverson, R. M. (1997). The physics of debris flows. Reviews of Geophysics, 35(3), 245-296.", { images: { "chart:a": { data: png, width: 300, height: 200 } } });
+    const d = await S.uploadBuf("草稿.docx", draftDocx);
+    r = await run("report-build", { file: d.id, title: "含圖報告" });
+    ok(r);
+    const xml = await (await JSZip.loadAsync(await S.download(r.files[0]))).file("word/document.xml").async("string");
+    assert.equal((xml.match(/<w:drawing>/g) || []).length, 1, "Word 草稿中的圖片應保留");
+    assert.match(xml, /圖1-<\/w:t>/);
+    r = await run("report-build", { title: "空的" });
+    assert.match(r.error.message, /請上傳草稿檔或貼上草稿內容/);
   });
 });
 

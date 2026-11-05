@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startStack, FILES, makePdf } from "./helpers.js";
+import { startStack, FILES, makePdf, makePaper } from "./helpers.js";
 import sharp from "sharp";
 
 const require = createRequire(import.meta.url);
@@ -42,6 +42,7 @@ const fileArg = (name) => ({ name, mimeType: "application/octet-stream", buffer:
 const gen = {
   "講義.pdf": await makePdf(5, "P"),
   "附件.pdf": await makePdf(2, "A", 600),
+  "論文.pdf": await makePaper(2),
   "照片1.jpg": await sharp({ create: { width: 2400, height: 1600, channels: 3, background: "#4a7" } }).jpeg({ quality: 95 }).toBuffer(),
   "照片2.jpg": await sharp({ create: { width: 1200, height: 1800, channels: 3, background: "#47a" } }).jpeg({ quality: 95 }).toBuffer(),
 };
@@ -227,6 +228,10 @@ const cases = {
   "pdf-pagenum": { fields: { files: { library: ["講義.pdf"] }, format: { select: "第 {n} 頁，共 {total} 頁" }, skipFirst: true }, expectAi: 0, out: [".pdf"], resultHas: "已加上頁碼" },
   "images-to-pdf": { fields: { files: { upload: ["照片1.jpg", "照片2.jpg"] }, filename: "相簿" }, expectAi: 0, out: [".pdf"], resultHas: "2 張圖片轉成 2 頁 PDF" },
   "pdf-compress": { fields: { files: { library: ["相簿.pdf"] }, level: { select: "high" } }, expectAi: 0, out: [".pdf"], resultHas: "減少" },
+  "mail-merge": { fields: { template: { upload: "獎狀範本.docx" }, data: { upload: "獎狀名單.xlsx" }, mode: { select: "separate" }, filename: "獎狀-{{姓名}}" }, expectAi: 0, out: [".zip"], resultHas: "3 筆" },
+  diagram: { fields: { kind: { select: "org" }, content: "研究中心\n  行政組\n  研究組\n    水資源團隊", title: "研究中心組織圖" }, expectAi: 0, out: [".png", ".svg"], resultHas: "研究中心" },
+  "paper-pdf-translate": { fields: { file: { upload: "論文.pdf" }, layout: { select: "side" }, table: true }, word: true, out: [".pdf"], resultHas: "翻譯段落" },
+  "report-build": { fields: { file: { upload: "報告草稿.md" }, title: "無網格法研究", pi: "王大明" }, expectAi: 0, word: true, resultHas: "未通過 0 項" },
   "image-batch": { fields: { files: { library: ["照片1.jpg", "照片2.jpg"] }, width: "800", format: { select: "webp" } }, expectAi: 0, out: [".zip"], resultHas: "照片1.webp" },
 };
 
@@ -252,7 +257,7 @@ async function fillField(key, v) {
   const mode = v.upload ? "upload" : v.library ? "library" : v.text !== undefined ? "text" : v.url ? "url" : null;
   if (mode) {
     await p.check(`input[name="${key}-mode"][value="${mode}"]`);
-    if (mode === "upload") return p.setInputFiles(id, fileArg(v.upload));
+    if (mode === "upload") return p.setInputFiles(id, gen[v.upload] ? genArg(v.upload) : fileArg(v.upload));
     if (mode === "library") return p.selectOption(`${id}-lib`, { label: v.library });
     if (mode === "text") return p.fill(`${id}-text`, v.text);
     return p.fill(`${id}-url`, v.url);

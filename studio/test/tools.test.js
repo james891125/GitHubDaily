@@ -309,3 +309,234 @@ describe("長錄音分段（ffmpeg）", { skip: !findFfmpeg() && "沒有 ffmpeg"
     await assert.rejects(prepareAudio(Buffer.alloc(1000, 1), ".mp3", { limitBytes: 10, force: true }), /音檔處理失敗/);
   });
 });
+
+// ======================= 新增：論文對照翻譯、圖表、報告排版、合併列印 =======================
+import { makePaper } from "./helpers.js";
+import { extractLayout, buildTranslatedPdf, translateBlocks, shouldTranslate, wrapText, fitText } from "../lib/pdftranslate.js";
+import { parseFlow, parseOutline, parseGantt, renderDiagram, parseDate, svgToPng as diagramPng } from "../lib/diagram.js";
+import { parseDraft, organize, buildReport, cnNumber } from "../lib/reportbuild.js";
+import { mailMerge, loadTemplate, toChineseAmount, formatValue } from "../lib/mailmerge.js";
+import { parseDocument } from "../lib/docs.js";
+
+describe("論文 PDF 對照翻譯（版面分析與排版）", () => {
+  test("段落辨識：雙欄分開、標題獨立、公式與頁碼不翻、參考文獻之後不翻", async () => {
+    const lay = await extractLayout(await makePaper(2));
+    const p1 = lay.pages[0].blocks;
+    const title = p1.find((b) => /^Meshless Methods/.test(b.text));
+    assert.ok(title?.translate && title.lines.length === 1);
+    const left = p1.filter((b) => b.x0 < 100 && b.lines.length > 3);
+    const right = p1.filter((b) => b.x0 > 300 && b.lines.length > 3);
+    assert.equal(left.length, 3, "左欄 3 段");
+    assert.equal(right.length, 3, "右欄 3 段");
+    assert.ok(left.every((b) => b.x1 < 300), "左欄段落不應跨到右欄");
+    // 閱讀順序：左欄全部在右欄之前
+    const order = p1.filter((b) => b.lines.length > 3).map((b) => (b.x0 < 300 ? "L" : "R")).join("");
+    assert.equal(order, "LLLRRR", order);
+    const eq = p1.find((b) => /u \( x , t \)/.test(b.text));
+    assert.equal(eq.translate, false, "公式不翻");
+    assert.equal(p1.find((b) => b.text === "1").translate, false, "頁碼不翻");
+    const p2 = lay.pages[1].blocks;
+    assert.equal(p2.find((b) => b.text === "References").translate, false);
+    assert.equal(p2.find((b) => /Iverson/.test(b.text)).translate, false, "參考文獻不翻");
+    // 行尾連字號接回、段落文字完整
+    assert.ok(left[0].text.split(" ").length > 30);
+  });
+  test("頁碼範圍與錯誤：超出範圍、掃描檔", async () => {
+    const lay = await extractLayout(await makePaper(3), { pages: "2-3" });
+    assert.deepEqual(lay.pages.map((p) => p.index), [1, 2]);
+    await assert.rejects(extractLayout(await makePaper(1), { pages: "5" }), /超出範圍/);
+    await assert.rejects(extractLayout(fs.readFileSync(path.join(FILES, "掃描檔.pdf"))), /掃描/);
+  });
+  test("判斷是否翻譯", () => {
+    assert.equal(shouldTranslate("The meshless method is accurate."), true);
+    assert.equal(shouldTranslate("x = 2 y + 3 z"), false);
+    assert.equal(shouldTranslate("12"), false);
+    assert.equal(shouldTranslate("本研究使用無網格法"), false, "已是中文");
+    assert.equal(shouldTranslate("本研究使用無網格法", "en"), true);
+  });
+  test("斷行與字級：中文逐字、英文不切單字；放不下時縮小字級", () => {
+    const lines = wrapText("無網格法（meshless method）可避免網格", 8);
+    assert.ok(lines.every((l) => !/meshle$|^ss/.test(l)));
+    const big = fitText("很長的譯文".repeat(40), 200, 40, 10);
+    assert.ok(big.size < 10 && big.lines.length * big.size * 1.25 <= 40 * 1.08 + big.size * 0.3);
+  });
+  test("產生 PDF：左右對照頁寬加倍、只有譯文與交錯的頁數正確，譯文確實畫上", async () => {
+    const buf = await makePaper(2);
+    const lay = await extractLayout(buf);
+    for (const p of lay.pages) for (const b of p.blocks) if (b.translate) b.out = "這是譯文段落，使用無網格法求解地下水流問題。";
+    const side = await PDFDocument.load(await buildTranslatedPdf(buf, lay, { layout: "side" }));
+    assert.equal(side.getPageCount(), 2);
+    assert.equal(Math.round(side.getPage(0).getWidth()), 1190);
+    assert.equal((await PDFDocument.load(await buildTranslatedPdf(buf, lay, { layout: "only" }))).getPageCount(), 2);
+    const inter = await buildTranslatedPdf(buf, lay, { layout: "interleave" });
+    assert.equal((await PDFDocument.load(inter)).getPageCount(), 4);
+    if (pdftoppm) {
+      // 譯文頁（交錯的第 2 頁）與原文頁不同：原文段落被蓋掉、換上譯文
+      const a = await inkRatio(inter, 1);
+      const b = await inkRatio(inter, 2);
+      assert.ok(Math.abs(a - b) > 0.005, `${a} vs ${b}`);
+    }
+  });
+});
+
+describe("圖表產生", () => {
+  test("流程圖寫法：串接、條件標籤、判斷與起訖形狀", () => {
+    const f = parseFlow("開始 -> 填表 -> 審核？\n審核？ -[通過]-> 核發 -> 結束\n審核？ --退回--> 填表");
+    assert.deepEqual(f.nodes.map((n) => [n.label, n.shape]), [["開始", "terminal"], ["填表", "process"], ["審核？", "decision"], ["核發", "process"], ["結束", "terminal"]]);
+    assert.equal(f.edges.length, 5);
+    assert.deepEqual(f.edges.filter((e) => e.label).map((e) => e.label), ["通過", "退回"]);
+    assert.throws(() => parseFlow("\n\n"), /沒有讀到任何步驟/);
+  });
+  test("大綱：空白縮排、Tab、清單符號、Markdown 標題都可以", () => {
+    const t = parseOutline("校長\n  教務處\n    註冊組\n\t學務處\n  - 總務處");
+    assert.equal(t.text, "校長");
+    assert.deepEqual(t.children.map((c) => c.text), ["教務處", "學務處", "總務處"]);
+    // 多個最上層項目：以空白根節點包住
+    assert.deepEqual(parseOutline("甲\n乙").children.map((c) => c.text), ["甲", "乙"]);
+    const m = parseOutline("# 研究\n## 方法\n### 模擬\n## 成果");
+    assert.deepEqual([m.text, m.children.map((c) => c.text), m.children[0].children[0].text], ["研究", ["方法", "成果"], "模擬"]);
+  });
+  test("甘特圖：西元、民國、天數、週、月、接續、分組；錯誤提示", () => {
+    assert.equal(parseDate("115/3/5").toISOString().slice(0, 10), "2026-03-05");
+    assert.equal(parseDate("2026年3月5日").toISOString().slice(0, 10), "2026-03-05");
+    const t = parseGantt("第一階段：\n文獻, 2026-02-01, 10天\n問卷, 接續, 2週\n第二階段：\n分析, 115/4/1, 2個月\n期中報告, 2026-06-30");
+    const d = (x) => x.toISOString().slice(0, 10);
+    assert.deepEqual(t.map((x) => [x.section, x.name, d(x.start), d(x.end)]), [
+      ["第一階段", "文獻", "2026-02-01", "2026-02-10"],
+      ["第一階段", "問卷", "2026-02-11", "2026-02-24"],
+      ["第二階段", "分析", "2026-04-01", "2026-05-31"],
+      ["第二階段", "期中報告", "2026-06-30", "2026-06-30"],
+    ]);
+    assert.equal(t[3].milestone, true);
+    assert.throws(() => parseGantt("文獻, 明天, 3天"), /開始日期「明天」無法辨識/);
+    assert.throws(() => parseGantt("文獻, 2026-03-01, 2026-02-01"), /早於開始日期/);
+  });
+  test("四種圖都能轉成 PNG，SVG 不含 NaN，中文正確跳脫", async () => {
+    const cases = {
+      flow: "開始 -> A&B 審核？ -[是]-> 結束",
+      org: "中心\n  甲組\n  乙組\n  丙組\n  丁組\n  戊組\n  己組",
+      mind: "主題\n  分支一\n    細項\n  分支二\n  分支三",
+      gantt: "工作 <1>, 2026-01-01, 2026-03-31\n工作二, 接續, 1個月",
+    };
+    for (const [k, v] of Object.entries(cases)) {
+      const svg = renderDiagram(k, v, { title: "測試" });
+      assert.ok(!/NaN|undefined/.test(svg), k);
+      assert.ok(!/<1>/.test(svg) && (k !== "flow" || /A&amp;B/.test(svg)), "應跳脫特殊字元");
+      const m = await sharp(await diagramPng(svg)).metadata();
+      assert.ok(m.width > 200 && m.height > 100, `${k} ${m.width}x${m.height}`);
+    }
+  });
+});
+
+describe("報告自動排版", () => {
+  const draft = () => fs.readFileSync(path.join(FILES, "報告草稿.md"), "utf8");
+  test("解析：標題、表、圖、圖表標題、參考文獻", () => {
+    const b = parseDraft(draft());
+    assert.ok(b.some((x) => x.kind === "caption" && x.label === "表" && x.oldNo === "2"));
+    assert.ok(b.some((x) => x.kind === "caption" && x.label === "圖" && x.oldNo === "3"));
+    assert.equal(b.filter((x) => x.kind === "table").length, 2);
+    assert.equal(b.filter((x) => x.kind === "image").length, 1);
+  });
+  test("整理：章節編號、圖標題移到圖下、依章重新編號、參考文獻排序", () => {
+    const o = organize(parseDraft(draft()));
+    const hs = o.blocks.filter((x) => x.kind === "heading").map((x) => x.text);
+    assert.deepEqual(hs.slice(0, 5), ["第一章 緒論", "第一節 研究背景", "第二節 研究目的", "一、建立模型", "第二章 文獻回顧"]);
+    assert.equal(o.map.get("表2").newNo, "1-1");
+    assert.equal(o.map.get("圖3").newNo, "1-1");
+    assert.equal(o.map.get("表5").newNo, "2-1");
+    const img = o.blocks.find((x) => x.kind === "image");
+    assert.equal(img.caption.title, "收斂曲線");
+    assert.match(o.refs[0], /^劉芷妤/);
+    assert.match(o.refs[1], /^Atluri/);
+    assert.match(o.refs[2], /^Iverson/);
+    assert.ok(o.refs.every((r) => !/^\[?\d/.test(r)), "原本的序號應去除");
+    assert.deepEqual(o.missing, ["附錄"]);
+    assert.equal(cnNumber(12), "十二");
+    assert.equal(cnNumber(21), "二十一");
+  });
+  test("產生的 Word 通過所有格式檢查；圖表用 SEQ、引用用 REF 功能變數、內文全形標點", async () => {
+    const r = await buildReport(draft(), { cover: { title: "測試報告", number: "NSTC 114-0000" } });
+    const c = await checkDocx(r.buf);
+    assert.deepEqual(c.results.filter((x) => x.status === "未通過" || x.status === "提醒").map((x) => `${x.item}：${x.detail}`), []);
+    const xml = await (await JSZip.loadAsync(r.buf)).file("word/document.xml").async("string");
+    assert.match(xml, /SEQ 表 \\r 1/);
+    assert.match(xml, /REF _Ref_tab_1_1 \\h/);
+    assert.match(xml, /TOC \\h \\c &quot;圖&quot;|TOC \\c &quot;圖&quot;/);
+    assert.equal((xml.match(/<w:drawing>/g) || []).length, 1, "圖片應保留");
+    const text = (await parseDocument("r.docx", r.buf)).text;
+    assert.match(text, /本研究探討無網格法於地下水問題之應用，結果顯示計算效率提升約30%。/);
+    // 功能變數的顯示文字（mammoth 不讀功能變數，直接看 XML）
+    const plain = [...xml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map((m) => m[1]).join("");
+    assert.match(plain, /如表1-1所示，收斂情形詳見圖1-1/);
+    assert.match(plain, /表1-1 數值結果比較/);
+    assert.match(plain, /各方法比較如表2-1/);
+    assert.match(text, /NSTC 114-0000/);
+    assert.ok(text.indexOf("參考文獻") < text.indexOf("附錄"));
+  });
+  test("計畫成果型：壹、一、（一）；Word 草稿（含圖片）也可以", async () => {
+    const docxDraft = await markdownToDocx(draft().replace(/^# 結論與建議/m, "# 成果自評\n\n本計畫成果良好。\n\n# 結論與建議").replace(/本研究/g, "本計畫"), {
+      images: {},
+    });
+    const r = await buildReport(draft().replace(/本研究/g, "本計畫"), { type: "project", cover: { title: "成果報告" } });
+    const text = (await parseDocument("r.docx", r.buf)).text;
+    assert.match(text, /壹、緒論/);
+    assert.match(text, /一、研究背景/);
+    assert.match(text, /（一）建立模型/);
+    assert.ok(docxDraft.length > 1000);
+  });
+  test("沒有內文時提示", async () => {
+    await assert.rejects(buildReport("# 緒論\n# 結論"), /草稿沒有內文/);
+  });
+});
+
+describe("合併列印", () => {
+  const tplBuf = () => fs.readFileSync(path.join(FILES, "獎狀範本.docx"));
+  const load = async () => parseTable("獎狀名單.xlsx", fs.readFileSync(path.join(FILES, "獎狀名單.xlsx")));
+  test("讀出範本欄位（含被拆開的 run 與 MERGEFIELD）", async () => {
+    const t = await loadTemplate(tplBuf());
+    assert.deepEqual(t.fields.sort(), ["姓名", "日期", "獎金", "獎項", "系所"].sort());
+  });
+  test("每人一份：檔名、內文、頁首、表格、民國日期、國字金額、MERGEFIELD 都正確；移除資料來源設定", async () => {
+    const r = await mailMerge(tplBuf(), await load(), { filename: "獎狀-{{姓名}}" });
+    assert.equal(r.count, 3, "空白列應略過");
+    const zip = await JSZip.loadAsync(r.buf);
+    assert.deepEqual(Object.keys(zip.files).sort(), ["獎狀-李美華.docx", "獎狀-王小明.docx", "獎狀-陳志強.docx"].sort());
+    const one = await zip.file("獎狀-陳志強.docx").async("nodebuffer");
+    const text = (await parseDocument("a.docx", one)).text.replace(/\*\*/g, "");
+    assert.match(text, /河海工程學系 陳志強 同學/);
+    assert.match(text, /榮獲 佳作/);
+    assert.match(text, /新臺幣 參仟伍佰元整（3,500 元）/);
+    assert.match(text, /中華民國 115年3月6日/);
+    assert.ok(!/\{\{|«|»|MERGEFIELD/.test(text));
+    const oz = await JSZip.loadAsync(one);
+    assert.match(await oz.file("word/header1.xml").async("string"), /受獎人：陳志強/);
+    assert.ok(!/mailMerge/.test(await oz.file("word/settings.xml").async("string")));
+    // 範本中只有「姓名」兩字是粗體：代入後的姓名保留粗體
+    assert.match(await oz.file("word/document.xml").async("string"), /<w:b\/><w:bCs\/><w:sz w:val="32"\/><w:szCs w:val="32"\/><\/w:rPr><w:t xml:space="preserve">陳志強<\/w:t>/);
+  });
+  test("合併成一個 Word：每人一頁，以分頁隔開", async () => {
+    const r = await mailMerge(tplBuf(), await load(), { mode: "combined" });
+    const xml = await (await JSZip.loadAsync(r.buf)).file("word/document.xml").async("string");
+    assert.equal((xml.match(/<w:br w:type="page"\/>/g) || []).length, 2);
+    assert.equal((xml.match(/<w:sectPr\b/g) || []).length, 1);
+    const text = (await parseDocument("a.docx", r.buf)).text.replace(/\*\*/g, "");
+    for (const n of ["王小明", "李美華", "陳志強"]) assert.match(text, new RegExp(`${n} 同學`));
+  });
+  test("欄位對不上、範本沒有欄位、XML 特殊字元", async () => {
+    await assert.rejects(mailMerge(tplBuf(), { columns: ["姓名"], rows: [{ 姓名: "甲" }] }), /找不到：「系所」/);
+    const plain = await markdownToDocx("沒有欄位的文件");
+    await assert.rejects(mailMerge(plain, { columns: ["姓名"], rows: [{ 姓名: "甲" }] }), /沒有找到任何欄位/);
+    const t = await load();
+    t.rows[0].姓名 = "A&B <公司>";
+    const r = await mailMerge(tplBuf(), t, { mode: "combined" });
+    const x = await (await JSZip.loadAsync(r.buf)).file("word/document.xml").async("string");
+    assert.match(x, /A&amp;B &lt;公司&gt;/);
+  });
+  test("金額國字與格式", () => {
+    assert.equal(toChineseAmount(100000001), "壹億零壹元整");
+    assert.equal(toChineseAmount(10500), "壹萬零伍佰元整");
+    assert.equal(formatValue("2026-03-05", "民國"), "115年3月5日");
+    assert.equal(formatValue("1234567", "千分位"), "1,234,567");
+    assert.equal(formatValue("abc", "千分位"), "abc");
+  });
+});

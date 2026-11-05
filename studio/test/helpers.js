@@ -78,3 +78,54 @@ export async function makePdf(n, label = "Page", width = 595) {
   for (let i = 1; i <= n; i++) d.addPage([width, 842]).drawText(`${label} ${i}`, { x: 50, y: 780, size: 24, font });
   return Buffer.from(await d.save());
 }
+
+/** 產生雙欄英文論文 PDF（標題、摘要、雙欄內文、公式、圖、頁碼、參考文獻），測試對照翻譯 */
+export async function makePaper(pages = 2) {
+  const d = await PDFDocument.create();
+  const font = await d.embedFont(StandardFonts.TimesRoman);
+  const bold = await d.embedFont(StandardFonts.TimesRomanBold);
+  const words = "The meshless method avoids mesh generation and provides accurate solutions for groundwater flow problems in heterogeneous porous media with complex boundaries".split(" ");
+  const para = (k, n) => Array.from({ length: n }, (_, i) => words[(i + k) % words.length]).join(" ") + ".";
+  const wrap = (text, f, size, width) => {
+    const lines = [];
+    let line = "";
+    for (const w of text.split(" ")) {
+      const t = line ? line + " " + w : w;
+      if (f.widthOfTextAtSize(t, size) > width) lines.push(line), (line = w);
+      else line = t;
+    }
+    if (line) lines.push(line);
+    return lines;
+  };
+  for (let p = 1; p <= pages; p++) {
+    const page = d.addPage([595, 842]);
+    let top = 790;
+    if (p === 1) {
+      page.drawText("Meshless Methods for Groundwater Flow", { x: 140, y: top, size: 18, font: bold });
+      top -= 40;
+      for (const l of wrap("Abstract. " + para(3, 40), font, 10, 495)) page.drawText(l, { x: 50, y: top, size: 10, font }), (top -= 12.5);
+      top -= 20;
+    }
+    for (const [ci, x] of [50, 310].entries()) {
+      let y = top;
+      page.drawText(`${p}.${ci + 1} Section heading`, { x, y, size: 12, font: bold });
+      y -= 20;
+      for (let k = 0; k < 3; k++) {
+        for (const l of wrap(para(p * 7 + ci * 3 + k, 45), font, 10, 235)) page.drawText(l, { x, y, size: 10, font }), (y -= 12.5);
+        y -= 10;
+        if (ci === 0 && k === 0) {
+          page.drawText("u ( x , t ) = a x + b t + c", { x: x + 40, y, size: 10, font }), (y -= 22);
+        }
+      }
+      if (ci === 1 && p === 1) {
+        page.drawRectangle({ x, y: y - 100, width: 235, height: 90, borderColor: { type: "RGB", red: 0, green: 0, blue: 0 }, borderWidth: 1, color: { type: "RGB", red: 0.85, green: 0.9, blue: 1 } });
+      }
+    }
+    if (p === pages) {
+      page.drawText("References", { x: 310, y: 230, size: 12, font: bold });
+      page.drawText("[1] Iverson, R. M. (1997). The physics of debris flows.", { x: 310, y: 212, size: 9, font });
+    }
+    page.drawText(String(p), { x: 295, y: 30, size: 9, font });
+  }
+  return Buffer.from(await d.save());
+}

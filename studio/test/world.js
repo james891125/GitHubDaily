@@ -141,6 +141,11 @@ export function fakeAnswer(system, userText, { hasPdf = false, hasImage = false 
     return { text: "知識庫中沒有相關資訊。" };
   }
   if (all.includes("連線成功")) return { text: "連線成功" };
+  // 圖表：依描述回傳對應的圖表寫法（有時會包在程式碼區塊中）
+  if (all.includes("整理成「流程圖」")) return { text: "```\n開始 -> 填寫請假單 -> 主管審核？\n主管審核？ -[核准]-> 人事室登錄 -> 結束\n主管審核？ -[退回]-> 填寫請假單\n```" };
+  if (all.includes("整理成「組織圖」")) return { text: "研究中心\n  主任\n    行政組\n    研究組\n      水資源團隊\n      海洋團隊" };
+  if (all.includes("整理成「心智圖」")) return { text: "期末報告\n  研究方法\n    數值模擬\n  成果\n    論文" };
+  if (all.includes("整理成「甘特圖")) return { text: "準備階段：\n文獻蒐集, 2026-02-01, 30天\n問卷設計, 接續, 2週\n執行階段：\n資料分析, 2026-04-01, 2026-05-31" };
   // 其他：回傳可辨識的摘要，並帶出輸入的開頭，用來驗證資料有正確傳入
   const snippet = userText.replace(/[#>*`|\-\n]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 40);
   return { text: `## AI 回覆\n\n- 重點一\n- 重點二\n\n（收到 ${userText.length} 字：${snippet}）` };
