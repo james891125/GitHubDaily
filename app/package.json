@@ -1,0 +1,18 @@
+{
+  "name": "githubdaily-workbench",
+  "version": "1.0.0",
+  "description": "GitHubDaily 開源專案工作台：瀏覽、AI 推薦、深度分析、比較與自訂流程化工作（自帶 API Key）",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "build:data": "node lib/build-data.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.5.0"
+  }
+}
