@@ -224,3 +224,6 @@ del { background: #fbdcd8; color: #8e1b10; }
 
 .gallery { display: flex; flex-wrap: wrap; gap: 10px; padding: 10px; }
 .gallery img { max-width: 240px; max-height: 240px; border: 1px solid var(--line); background: var(--code); }
+
+/* 結果表格中的粗體狀態（例如「未通過」）不換行 */
+.result td strong { white-space: nowrap; }

@@ -475,7 +475,7 @@ async function runService(svc) {
   const nodes = svc.nodes;
   box.innerHTML = `<div class="panel"><div class="panel-head"><span>辦理進度</span><span id="svc-status" class="muted" style="font-weight:400"></span></div>
     <div class="table-wrap"><table class="data-table"><thead><tr><th style="width:48px">步驟</th><th>項目</th><th style="width:90px">狀態</th><th>說明</th></tr></thead><tbody>
-    ${nodes.map((n, i) => `<tr data-node="${n.id}"><td class="num">${i + 1}</td><td>${esc(n.title || META.nodeTypes[n.type]?.label || n.type)}</td><td><span class="st st-wait">等待中</span></td><td><div class="steplog"></div></td></tr>`).join("")}
+    ${nodes.map((n, i) => `<tr data-node="${n.id}"><td class="num">${i + 1}</td><td>${esc((n.title && !n.title.includes("{{") && n.type !== "kb_add" ? n.title : "") || META.nodeTypes[n.type]?.label || n.type)}</td><td><span class="st st-wait">等待中</span></td><td><div class="steplog"></div></td></tr>`).join("")}
     </tbody></table></div></div>
     <div class="panel hidden" id="svc-files-panel"><div class="panel-head">產出檔案</div><div id="svc-files"></div></div>
     <div class="panel hidden" id="svc-out-panel"><div class="panel-head"><span>辦理結果</span><button class="btn btn-sm" id="svc-copy" type="button">複製文字</button></div><div class="panel-body"><div class="result" id="svc-out"></div></div></div>`;
@@ -816,7 +816,7 @@ function renderEditor() {
       .map((n, i) => {
         const def = META.nodeTypes[n.type];
         const out = n.out ?? def.out;
-        return `<tr class="node-row ${n.disabled ? "disabled" : ""}" data-i="${i}"><td class="num">${i + 1}</td><td>${esc(n.title || def.label)}<div class="steplog"></div></td><td>${out ? `<code>{{${esc(out)}}}</code>` : "—"}</td><td class="nst">${n.disabled ? `<span class="st st-skip">停用</span>` : `<span class="st st-wait">—</span>`}</td>
+        return `<tr class="node-row ${n.disabled ? "disabled" : ""}" data-i="${i}"><td class="num">${i + 1}</td><td>${esc((n.title && !n.title.includes("{{") && n.type !== "kb_add" ? n.title : "") || def.label)}<div class="steplog"></div></td><td>${out ? `<code>{{${esc(out)}}}</code>` : "—"}</td><td class="nst">${n.disabled ? `<span class="st st-skip">停用</span>` : `<span class="st st-wait">—</span>`}</td>
           <td class="nowrap"><button class="btn btn-sm" data-op="edit" type="button">${openNodes.has(i) ? "收合" : "設定"}</button> <button class="btn btn-sm" data-op="up" type="button">上移</button> <button class="btn btn-sm" data-op="down" type="button">下移</button> <button class="btn btn-sm" data-op="toggle" type="button">${n.disabled ? "啟用" : "停用"}</button> <button class="btn btn-sm btn-danger" data-op="rm" type="button">刪除</button></td></tr>
           ${
             openNodes.has(i)

@@ -561,6 +561,8 @@ describe("PDF 與圖片工具", () => {
     assert.deepEqual(widths, [600, 600, 600, 595, 595], "應依選擇順序合併");
     const one = await run("pdf-merge", { files: [a.id] });
     assert.match(one.error.message, /至少需要 2 個檔案/);
+    const def = await run("pdf-merge", { files: [a.id, b.id], filename: "合併檔-{{today}}" });
+    assert.equal(def.files[0].name.replace(/^\d+_/, ""), `合併檔-${new Date().toLocaleDateString("sv-SE")}.pdf`);
     const none = await run("pdf-merge", { files: [] });
     assert.match(none.error.message, /請選擇「PDF 檔案/);
   });

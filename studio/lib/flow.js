@@ -227,7 +227,7 @@ export const NODE_TYPES = {
     fields: {
       fileId: { label: "問卷資料檔（CSV／Excel）", type: "file", default: "" },
       group: { label: "分組比較欄位（選填，填題目名稱）", type: "text", default: "" },
-      title: { label: "報告標題", type: "text", default: "問卷分析報告" },
+      reportTitle: { label: "報告標題", type: "text", default: "問卷分析報告" },
       ai: { label: "使用 AI 撰寫分析摘要與開放題歸納", type: "checkbox", default: false },
     },
     out: "survey",
@@ -450,7 +450,7 @@ export async function prepareServiceForm(service, form = {}, { signal } = {}) {
     if (f.type === "doc") out[f.key] = v ? await resolveDocSource(v, { signal }) : undefined;
     else if (f.type === "files") out[f.key] = (Array.isArray(v) ? v : String(v ?? "").split(",")).map((x) => String(x).trim()).filter(Boolean).join(",");
     else if (f.type === "checkbox") out[f.key] = v === true || v === "true" || v === "on" ? "true" : "";
-    else out[f.key] = v == null ? (f.default ?? "") : String(v).trim();
+    else out[f.key] = (v == null ? String(f.default ?? "") : String(v).trim()).replace(/\{\{\s*today\s*\}\}/g, new Date().toLocaleDateString("sv-SE"));
   }
   return out;
 }
@@ -652,7 +652,7 @@ async function runNode(rawNode, vars, ctx) {
         openSummary = m ? m[1].trim() : "";
         narrative = (m ? text.slice(0, m.index) : text).replace(/【分析摘要】/, "").trim();
       }
-      const title = render(node.title || "問卷分析報告", vars).trim() || "問卷分析報告";
+      const title = render(node.reportTitle || "問卷分析報告", vars).trim() || "問卷分析報告";
       const md = surveyMarkdown(a, { title, narrative, openSummary });
       const images = {};
       const svgs = {};

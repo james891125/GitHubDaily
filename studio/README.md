@@ -1,18 +1,19 @@
 # AI 辦公服務平台
 
-在自己電腦上執行、使用自己 API Key 的辦公服務平台。它把開源社群中常見工具的功能，整理成 **29 項現成的服務**：像校務、行政系統的「線上申辦」一樣，選擇服務、填寫表單、按送出，就能取得結果（Word、Excel 或文字），不需要自己設計流程。
+在自己電腦上執行、使用自己 API Key 的辦公服務平台。它把開源社群中常見工具的功能，整理成 **39 項現成的服務**：像校務、行政系統的「線上申辦」一樣，選擇服務、填寫表單、按送出，就能取得結果（Word、Excel 或文字），不需要自己設計流程。
 
 | 類別 | 服務項目 | 參考的開源專案做法 |
 |---|---|---|
 | **文書行政** | 公文撰寫（簽、函、公告、書函、開會通知單，標楷體 Word）、會議紀錄整理、信件回覆草稿、錯字與語句校對、文件摘要、文件版本比對、繁簡轉換 | OpenCC、diff |
-| **學術研究** | 文獻搜尋與整理（OpenAlex／arXiv → Excel）、文獻回顧草稿（只引用真實搜尋結果）、論文翻譯與摘要、參考文獻格式產生（APA、IEEE、Chicago、MLA、Harvard、BibTeX）、研究主題追蹤（可定期） | arxiv-mcp-server、zotero-pdf2zh、SurveyX |
-| **文件與資料** | 掃描文件文字辨識、文件翻譯（含術語表）、資料擷取成 Excel、資料表分析報告、文件轉純文字 | MinerU、Ollama-OCR、zerox、PDFMathTranslate |
-| **影音與圖片** | 錄音轉逐字稿（含時間標記與 .srt 字幕）、會議錄音整理、課堂與演講筆記、圖片分析與說明、AI 圖片生成、簡報轉講稿 | Whisper、SoftWhisper、hyprnote |
+| **學術研究** | 文獻搜尋與整理（OpenAlex／arXiv → Excel）、文獻回顧草稿（只引用真實搜尋結果）、論文翻譯與摘要、參考文獻格式產生（APA、IEEE、Chicago、MLA、Harvard、BibTeX）、研究主題追蹤（可定期）、**計畫書／成果報告格式檢查**（依國科會、縣市計畫成果報告規範逐項檢查並自動修正） | arxiv-mcp-server、zotero-pdf2zh、SurveyX |
+| **文件與資料** | 掃描文件文字辨識、文件翻譯（含術語表）、資料擷取成 Excel、資料表分析報告、文件轉純文字、**問卷結果分析**（Google 表單 CSV → 統計圖表與 Word／Excel／HTML 報告） | MinerU、Ollama-OCR、zerox、PDFMathTranslate |
+| **影音與圖片** | 錄音轉逐字稿（含時間標記與 .srt 字幕，長錄音自動分段）、會議錄音整理、課堂與演講筆記、圖片分析與說明、AI 圖片生成、簡報轉講稿 | Whisper、SoftWhisper、hyprnote |
 | **網站與資訊** | 網站健康檢查、網頁變動監控、新聞與公告摘要（RSS）、外文網頁翻譯摘要、網路研究報告、網站匯入知識庫 | Web-Check、changedetection、crawl4ai、Perplexica |
+| **PDF 與圖片工具** | PDF 合併、分割、頁面整理（擷取／排序／刪除／旋轉）、加浮水印（支援中文）、加頁碼、壓縮、圖片轉 PDF、圖片批次處理（縮放、轉格式、壓縮、移除 GPS 等拍攝資訊） | Stirling-PDF、pdf-lib、sharp |
 | **知識庫問答** | 上傳規章、手冊、FAQ，AI 只根據這些資料回答並標註出處 | MaxKB、AnythingLLM |
-| **自訂工作流程**（進階） | 以 27 種步驟自行組合流程，可定期執行、匯入匯出 | n8n、Dify、huginn |
+| **自訂工作流程**（進階） | 以 31 種步驟自行組合流程，可定期執行、匯入匯出 | n8n、Dify、huginn |
 
-所有功能皆重新撰寫，不需另外安裝上述專案。標示「不使用 AI」的服務（文獻搜尋、引用格式、繁簡轉換、文件比對、網站檢查等）完全不花 API 費用。
+所有功能皆重新撰寫，不需另外安裝上述專案。標示「不使用 AI」的服務（文獻搜尋、引用格式、繁簡轉換、文件比對、網站檢查、問卷分析、格式檢查、PDF 與圖片工具等）完全不花 API 費用。
 
 ### 介面
 
@@ -62,8 +63,8 @@ npm start
 | 類型 | 格式 |
 |---|---|
 | 文件 | PDF、Word（.docx、.doc）、Excel（.xlsx、.xls）、PowerPoint（.pptx、.ppt，含講者備註與表格）、OpenDocument（.odt、.ods、.odp）、RTF（含 Big5 編碼）、EPUB、Email（.eml，含 Big5 編碼與附件清單）、CSV／TSV、TXT、Markdown、HTML、JSON、XML、字幕（.srt、.vtt） |
-| 圖片 | PNG、JPG、WEBP、GIF（文字辨識、圖片分析） |
-| 音檔 | MP3、M4A、WAV、WEBM、OGG、FLAC、AAC、MP4（轉錄上限 25 MB） |
+| 圖片 | PNG、JPG、WEBP、GIF、TIFF、BMP、AVIF、SVG（文字辨識、圖片分析時自動轉成 AI 支援的格式；HEIC 請先轉成 JPG） |
+| 音檔 | MP3、M4A、WAV、WEBM、OGG、FLAC、AAC、MP4（內建 ffmpeg 自動轉成語音專用格式，一小時約 14 MB；超過上限自動分段轉錄並接上時間軸） |
 
 - 舊版 `.xls`、`.ppt`（以及少數 `.doc`）需要電腦安裝免費的 [LibreOffice](https://www.libreoffice.org) 才能讀取；未安裝時會提示另存為新格式。
 - Outlook 的 `.msg` 目前不支援，請在 Outlook 另存為 `.eml`。
@@ -112,6 +113,10 @@ ScienceDirect、Springer、Wiley 等期刊網站會擋程式直接擷取，論�
 | 條件判斷 | 小於／大於／等於／包含／**與上次執行不同**，不成立就停止 | — |
 | 組合文字 | 用模板組出新內容 | `{{text}}` |
 | 輸出檔案 | .md / .txt / .csv / .xlsx / .json | `{{file}}` |
+| 問卷分析 | CSV／Excel → 題型判斷、統計、圖表、Word／Excel／HTML 報告（個資欄位排除） | `{{survey}}` |
+| 報告格式檢查 | Word 檔逐項檢查字型、字級、對齊、標號、架構、圖表、用語、參考文獻，可自動修正 | `{{check}}` |
+| PDF 工具 | 合併、分割、擷取／刪除／旋轉頁面、浮水印、頁碼、壓縮、圖片轉 PDF | `{{pdf}}` |
+| 圖片批次處理 | 縮放、轉格式、壓縮、移除 EXIF | `{{images}}` |
 | 發送通知 | POST 到 Slack / Discord / Teams Webhook | — |
 
 內建變數：`{{input}}`（執行時的輸入）、`{{today}}`（2026-01-31）、`{{now}}`。
@@ -160,14 +165,17 @@ data/
 
 - **知識庫檢索**使用本機 BM25（中日韓文以單字＋雙字切詞），不需要 Embedding API，所以 Claude、DeepSeek、Ollama 等任何模型都能用。
 - **PDF** 使用 pdf.js（含 CMap，支援中文），**Word** 使用 mammoth，**Excel** 使用 ExcelJS，**網頁正文**使用 Mozilla Readability + Turndown。
-- 掃描影像型 PDF（沒有文字層）目前不支援 OCR，會顯示明確提示。
+- 掃描影像型 PDF（沒有文字層）使用「掃描文件文字辨識」服務處理。
+- **長錄音**：`npm install` 會一併下載 ffmpeg（ffmpeg-static），也可用環境變數 `FFMPEG_PATH` 指定。錄音先轉成單聲道 16 kHz 32 kbps MP3，超過供應商上限時切段轉錄，下一段的提示附上前一段結尾讓用詞連貫，字幕時間軸自動接續。
+- **PDF 工具**使用 pdf-lib；中文浮水印與頁碼先由 sharp 轉成圖片再嵌入，不需安裝字型。壓縮會重新壓縮內嵌圖片；若電腦已安裝 Ghostscript（或以 `GS_PATH` 指定）會自動採用效果較好者。
+- **問卷分析**、**格式檢查**都在本機計算；勾選 AI 選項時只送出統計結果或報告文字，不送出姓名、Email 等個資欄位。格式檢查的規則依「報告撰寫規範」（標楷體＋Times New Roman、內文 12pt、章標題 16pt 粗體、節標題 14pt 粗體、圖表標題 14pt、兩端對齊、表標題在上、圖標題在下、圖1-1 編號、目錄功能變數、參考文獻 APA 等）。
 - 伺服器預設只監聽 `127.0.0.1`，並拒絕跨站 POST 請求。爬蟲與 API 節點可以連到內網位址，這是刻意的設計（方便處理公司內部網站），請勿把本服務公開到網際網路。
 - Claude Opus／Sonnet 模型會自動開啟伺服器端備援（`fallbacks: "default"`）。
 
 ## 測試
 
 ```bash
-npm test          # 單元、整合、服務、供應商與格式測試（211 項，約 2 分鐘，不需網路與金鑰）
+npm test          # 單元、整合、服務、供應商與格式測試（251 項，約 3 分鐘，不需網路與金鑰）
 npm run test:ui   # 瀏覽器端到端測試（需要 Playwright）
 ```
 
@@ -176,7 +184,7 @@ npm run test:ui   # 瀏覽器端到端測試（需要 Playwright）
 - **假網站**：一般頁面、Big5 編碼（含只在 `<meta>` 宣告編碼的舊網站）、轉址、gzip、直接連到 PDF / Word、以附件下載、被擋（403）、限流（429）、伺服器錯誤、只有 JavaScript 才有內容的網頁、JSON API
 - **假 AI**：OpenAI 相容（一般、只收 `max_completion_tokens` 的新模型、推理模型、只收 `max_tokens` 的舊服務、限流、回傳壞掉的 JSON）、Claude（Messages API 串流格式、拒絕回答）
 - **Webhook 接收器、學術 API（Elsevier / Crossref / OpenAlex）**
-- **測試檔案**（`test/files/`）：中文 PDF、掃描型 PDF、Word（含表格）、Excel、CSV、Markdown、TXT、HTML、空白檔
+- **測試檔案**（`test/files/`）：中文 PDF、掃描型 PDF、Word（含表格）、Excel、CSV、Markdown、TXT、HTML、空白檔、Google 表單問卷 CSV、符合規範與含常見錯誤的報告 Word 檔；測試時另以 ffmpeg 產生 150 秒音檔驗證分段，以 pdf-lib、sharp 產生 PDF 與照片
 
 涵蓋範圍：
 
@@ -200,6 +208,12 @@ studio/
 │   ├── scholar.js     # 學術論文（Elsevier / Crossref / OpenAlex）
 │   ├── kb.js          # 知識庫（BM25 + 問答）
 │   ├── flow.js        # 工作流引擎、節點、範本、排程
+│   ├── services.js    # 服務目錄（表單欄位 + 流程）
+│   ├── survey.js      # 問卷分析、圖表
+│   ├── formatcheck.js # 報告格式檢查與自動修正
+│   ├── pdftools.js    # PDF 工具
+│   ├── imagetools.js  # 圖片批次處理
+│   ├── audio.js       # ffmpeg 轉檔與分段
 │   └── store.js       # 本機 JSON 儲存
 ├── public/            # 前端（純 HTML/CSS/JS，無需建置）
 └── test/              # 測試與模擬世界

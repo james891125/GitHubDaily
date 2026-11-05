@@ -5,7 +5,8 @@ import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startStack, FILES } from "./helpers.js";
+import { startStack, FILES, makePdf } from "./helpers.js";
+import sharp from "sharp";
 
 const require = createRequire(import.meta.url);
 let chromium;
@@ -36,6 +37,15 @@ const assert = (cond, msg) => {
 };
 // 以記憶體中的檔案上傳（保留中文檔名；部分環境的 Playwright 無法處理含中文的「路徑」）
 const fileArg = (name) => ({ name, mimeType: "application/octet-stream", buffer: fs.readFileSync(path.join(FILES, name)) });
+
+// PDF 與圖片工具用的測試檔
+const gen = {
+  "講義.pdf": await makePdf(5, "P"),
+  "附件.pdf": await makePdf(2, "A", 600),
+  "照片1.jpg": await sharp({ create: { width: 2400, height: 1600, channels: 3, background: "#4a7" } }).jpeg({ quality: 95 }).toBuffer(),
+  "照片2.jpg": await sharp({ create: { width: 1200, height: 1800, channels: 3, background: "#47a" } }).jpeg({ quality: 95 }).toBuffer(),
+};
+const genArg = (name) => ({ name, mimeType: "application/octet-stream", buffer: gen[name] });
 
 const S = await startStack();
 const { world, BASE } = S;
@@ -208,6 +218,16 @@ const cases = {
   "image-analysis": { fields: { file: { library: "截圖.png" }, task: { select: "解讀圖表數據" } } },
   "image-generate": { fields: { desc: "校園林蔭大道", style: { select: "水彩手繪" }, n: "2" }, png: 2 },
   "slides-script": { fields: { doc: { library: "簡報.pptx" }, audience: "系上老師" }, word: true },
+  "survey-analysis": { fields: { file: { upload: "問卷回覆.csv" }, title: "活動滿意度調查", group: "系所" }, expectAi: 0, word: true, xlsx: true, out: [".html"], resultHas: "有效問卷：60 份" },
+  "report-format-check": { fields: { file: { upload: "報告-格式錯誤.docx" }, profile: { select: "academic" }, fix: true }, expectAi: 0, word: true, resultHas: "未通過", outCount: 2 },
+  "pdf-merge": { fields: { files: { upload: ["講義.pdf", "附件.pdf"], library: ["中文報告.pdf"], moveUp: 2 } }, expectAi: 0, out: [".pdf"], resultHas: "合併 3 個檔案（講義.pdf、中文報告.pdf、附件.pdf）" },
+  "pdf-split": { fields: { files: { upload: ["講義.pdf"] }, mode: { select: "every" }, every: "2" }, expectAi: 0, out: [".zip"], resultHas: "分割成 3 個檔案" },
+  "pdf-pages": { fields: { files: { library: ["講義.pdf"] }, op: { select: "extract" }, ranges: "5, 1-2" }, expectAi: 0, out: [".pdf"], resultHas: "擷取 3 頁" },
+  "pdf-watermark": { fields: { files: { library: ["中文報告.pdf"] }, text: "機密文件", tile: true }, expectAi: 0, out: [".pdf"], resultHas: "已加上浮水印" },
+  "pdf-pagenum": { fields: { files: { library: ["講義.pdf"] }, format: { select: "第 {n} 頁，共 {total} 頁" }, skipFirst: true }, expectAi: 0, out: [".pdf"], resultHas: "已加上頁碼" },
+  "images-to-pdf": { fields: { files: { upload: ["照片1.jpg", "照片2.jpg"] }, filename: "相簿" }, expectAi: 0, out: [".pdf"], resultHas: "2 張圖片轉成 2 頁 PDF" },
+  "pdf-compress": { fields: { files: { library: ["相簿.pdf"] }, level: { select: "high" } }, expectAi: 0, out: [".pdf"], resultHas: "減少" },
+  "image-batch": { fields: { files: { library: ["照片1.jpg", "照片2.jpg"] }, width: "800", format: { select: "webp" } }, expectAi: 0, out: [".zip"], resultHas: "照片1.webp" },
 };
 
 async function fillField(key, v) {
@@ -218,6 +238,16 @@ async function fillField(key, v) {
     const value = await p.$eval(id, (el, want) => [...el.options].find((o) => o.value === want || o.textContent.startsWith(want))?.value, v.select);
     if (value === undefined) throw new Error(`選單 ${key} 沒有「${v.select}」`);
     return p.selectOption(id, value);
+  }
+  if (key === "files") {
+    // 多檔欄位：先上傳、再從檔案庫加入，最後可調整順序
+    if (v.upload) await p.setInputFiles(id, v.upload.map((n) => (gen[n] ? genArg(n) : fileArg(n))));
+    for (const label of v.library || []) await p.selectOption(`${id}-lib`, { label });
+    const n = (v.upload?.length || 0) + (v.library?.length || 0);
+    await p.waitForFunction((k) => document.querySelectorAll(`[data-filesfield="${k}"] .files-list tbody tr`).length, key);
+    assert((await p.locator(`[data-filesfield="${key}"] .files-list tbody tr`).count()) === n, "檔案清單數量不符");
+    if (v.moveUp !== undefined) await p.click(`[data-filesfield="${key}"] .files-list tbody tr[data-i="${v.moveUp}"] [data-fop="up"]`);
+    return;
   }
   const mode = v.upload ? "upload" : v.library ? "library" : v.text !== undefined ? "text" : v.url ? "url" : null;
   if (mode) {
@@ -271,6 +301,8 @@ for (const svc of services) {
     const links = await p.locator("#svc-files table a").evaluateAll((as) => as.map((a) => ({ href: a.getAttribute("href"), name: a.getAttribute("download") })));
     if (c.word) assert(links.some((l) => l.name.endsWith(".docx")), "應產出 Word：" + JSON.stringify(links));
     if (c.xlsx) assert(links.some((l) => l.name.endsWith(".xlsx")), "應產出 Excel：" + JSON.stringify(links));
+    for (const ext of c.out || []) assert(links.some((l) => l.name.endsWith(ext)), `應產出 ${ext}：` + JSON.stringify(links));
+    if (c.outCount) assert(links.length === c.outCount, `應產出 ${c.outCount} 個檔案：` + JSON.stringify(links));
     if (c.srt) assert(links.some((l) => l.name.endsWith(".srt")), "應產出字幕檔：" + JSON.stringify(links));
     if (c.png) {
       assert(links.filter((l) => l.name.endsWith(".png")).length === c.png, "應產出圖片：" + JSON.stringify(links));
@@ -280,6 +312,11 @@ for (const svc of services) {
     for (const l of links) {
       const res = await fetch(BASE + l.href);
       assert(res.status === 200 && (await res.arrayBuffer()).byteLength > 0, "下載失敗：" + l.name);
+    }
+    if (svc.id === "images-to-pdf") {
+      const pdf = links.find((l) => l.name.endsWith(".pdf"));
+      const buf = Buffer.from(await (await fetch(BASE + pdf.href)).arrayBuffer());
+      await S.uploadBuf("相簿.pdf", buf);
     }
     await p.screenshot({ path: path.join(SHOTS, `10-svc-${svc.id}.png`), fullPage: true });
   });

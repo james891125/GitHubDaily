@@ -621,7 +621,7 @@ export const SERVICES = [
       { key: "group", label: "分組比較欄位（選填）", type: "text", placeholder: "填入題目名稱，例：身分別；會依此比較各組的量表平均" },
       { key: "ai", label: "AI 分析摘要（選填，會使用 AI）", type: "checkbox", default: false, help: "由 AI 依統計結果撰寫重點發現與建議，並歸納開放題意見。" },
     ],
-    nodes: [{ id: "survey", type: "survey", fileId: "{{form.file}}", group: "{{form.group}}", title: "{{form.title}}", ai: "{{form.ai}}", out: "survey" }],
+    nodes: [{ id: "survey", type: "survey", fileId: "{{form.file}}", group: "{{form.group}}", reportTitle: "{{form.title}}", ai: "{{form.ai}}", out: "survey" }],
   },
   // ======================= 報告格式檢查 =======================
   {
@@ -735,19 +735,6 @@ export const SERVICES = [
     nodes: [{ id: "pdf", type: "pdf_tool", op: "pagenum", fileIds: "{{form.files}}", text: "{{form.format}}", position: "{{form.position}}", skipFirst: "{{form.skipFirst}}", filename: "頁碼-{{today}}", out: "pdf" }],
   },
   {
-    id: "pdf-compress",
-    cat: "tools",
-    name: "PDF 壓縮",
-    desc: "降低 PDF 檔案大小，方便以 Email 寄送或上傳系統（掃描檔、含照片的檔案效果最明顯）。",
-    ai: "none",
-    notes: ["主要壓縮內嵌的圖片（降低解析度與 JPEG 品質）；純文字 PDF 可壓縮的空間有限。", "若電腦已安裝 Ghostscript，系統會自動使用以取得更好的效果。", "壓縮後若比原檔大，會保留原檔。"],
-    fields: [
-      { key: "files", label: "PDF 檔案", type: "files", required: true, accept: ".pdf" },
-      { key: "level", label: "壓縮程度", type: "select", options: { low: "輕度（品質優先，200 dpi）", medium: "中度（建議，150 dpi）", high: "高度（檔案最小，100 dpi）" }, default: "medium" },
-    ],
-    nodes: [{ id: "pdf", type: "pdf_tool", op: "compress", fileIds: "{{form.files}}", level: "{{form.level}}", filename: "壓縮-{{today}}", out: "pdf" }],
-  },
-  {
     id: "images-to-pdf",
     cat: "tools",
     name: "圖片轉 PDF",
@@ -760,6 +747,19 @@ export const SERVICES = [
       { key: "filename", label: "檔名", type: "text", default: "圖片-{{today}}" },
     ],
     nodes: [{ id: "pdf", type: "pdf_tool", op: "images", fileIds: "{{form.files}}", pageSize: "{{form.pageSize}}", filename: "{{form.filename}}", out: "pdf" }],
+  },
+  {
+    id: "pdf-compress",
+    cat: "tools",
+    name: "PDF 壓縮",
+    desc: "降低 PDF 檔案大小，方便以 Email 寄送或上傳系統（掃描檔、含照片的檔案效果最明顯）。",
+    ai: "none",
+    notes: ["主要壓縮內嵌的圖片（降低解析度與 JPEG 品質）；純文字 PDF 可壓縮的空間有限。", "若電腦已安裝 Ghostscript，系統會自動使用以取得更好的效果。", "壓縮後若比原檔大，會保留原檔。"],
+    fields: [
+      { key: "files", label: "PDF 檔案", type: "files", required: true, accept: ".pdf" },
+      { key: "level", label: "壓縮程度", type: "select", options: { low: "輕度（品質優先，200 dpi）", medium: "中度（建議，150 dpi）", high: "高度（檔案最小，100 dpi）" }, default: "medium" },
+    ],
+    nodes: [{ id: "pdf", type: "pdf_tool", op: "compress", fileIds: "{{form.files}}", level: "{{form.level}}", filename: "壓縮-{{today}}", out: "pdf" }],
   },
   {
     id: "image-batch",
