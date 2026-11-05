@@ -8,8 +8,10 @@ import { htmlToMarkdown } from "./web.js";
 // pdf.js 需要 CMap 與標準字型檔才能正確擷取中日韓文字
 const require = createRequire(import.meta.url);
 const PDFJS_DIR = path.dirname(require.resolve("pdfjs-dist/package.json"));
-const CMAP_URL = path.join(PDFJS_DIR, "cmaps") + path.sep;
-const FONT_URL = path.join(PDFJS_DIR, "standard_fonts") + path.sep;
+// pdf.js 規定路徑必須以「/」結尾；Windows 的 Node.js 也能讀取「C:/…/」這種寫法，因此統一轉成「/」
+export const toPdfjsDir = (p, sep = path.sep) => p.split(sep).join("/").replace(/\/?$/, "/");
+const CMAP_URL = toPdfjsDir(path.join(PDFJS_DIR, "cmaps"));
+const FONT_URL = toPdfjsDir(path.join(PDFJS_DIR, "standard_fonts"));
 
 export const SUPPORTED = [".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md", ".markdown", ".html", ".htm", ".json"];
 
