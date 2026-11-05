@@ -83,16 +83,47 @@ async function claudeChat(s, { system, messages, maxTokens = 32000, model }, onT
   }
 }
 
-async function openaiChat(s, { system, messages, maxTokens = 8000, model }, onText, signal) {
+// 記住每個端點＋模型該用哪個長度參數，避免每次都先失敗一次
+const tokenParamCache = new Map();
+
+/**
+ * 送出 chat/completions。輸出長度參數有兩種名稱：
+ * - max_completion_tokens：OpenAI 新模型（GPT-5、o 系列等推理模型）只接受這個
+ * - max_tokens：DeepSeek、Ollama、OpenRouter 等多數相容服務使用這個
+ * 先依端點猜一個，若被回「不支援此參數」就自動換另一個重試。
+ */
+export async function postChatCompletion({ base, key, model, messages, maxTokens, signal }) {
+  const cacheKey = `${base}|${model}`;
+  const first = tokenParamCache.get(cacheKey) || (/api\.openai\.com/.test(base) ? "max_completion_tokens" : "max_tokens");
+  const send = (param) =>
+    fetch(`${base}/chat/completions`, {
+      method: "POST",
+      signal,
+      headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
+      body: JSON.stringify({ model, messages, stream: true, [param]: maxTokens }),
+    });
+  let param = first;
+  let res = await send(param);
+  if (res.status === 400) {
+    const errText = await res.text().catch(() => "");
+    const other = param === "max_tokens" ? "max_completion_tokens" : "max_tokens";
+    if (/unsupported|not supported|unrecognized|unknown|extra/i.test(errText) && errText.includes(param)) {
+      param = other;
+      res = await send(param);
+    } else {
+      throw new LLMError(`API 錯誤（400）：${errText.slice(0, 300)}`, 400);
+    }
+  }
+  if (!res.ok) throw new LLMError(`API 錯誤（${res.status}）：${(await res.text().catch(() => "")).slice(0, 300)}`, res.status);
+  tokenParamCache.set(cacheKey, param);
+  return res;
+}
+
+async function openaiChat(s, { system, messages, maxTokens = 16000, model }, onText, signal) {
   const base = (s.openaiBase || "https://api.openai.com/v1").replace(/\/+$/, "");
   const msgs = system ? [{ role: "system", content: system }, ...messages] : messages;
-  const res = await fetch(`${base}/chat/completions`, {
-    method: "POST",
-    signal,
-    headers: { "content-type": "application/json", ...(s.openaiKey ? { authorization: `Bearer ${s.openaiKey}` } : {}) },
-    body: JSON.stringify({ model: model || s.openaiModel, messages: msgs, stream: true, max_tokens: maxTokens }),
-  });
-  if (!res.ok) throw new LLMError(`API 錯誤（${res.status}）：${(await res.text().catch(() => "")).slice(0, 300)}`, res.status);
+  // 推理模型的思考也算在長度上限內，所以預設給大一點
+  const res = await postChatCompletion({ base, key: s.openaiKey, model: model || s.openaiModel, messages: msgs, maxTokens, signal });
   let text = "";
   let buf = "";
   const dec = new TextDecoder();

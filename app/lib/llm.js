@@ -109,14 +109,26 @@ async function generateOpenAI(cfg, { system, prompt, maxTokens = 8000 }, onText)
   const messages = [];
   if (system) messages.push({ role: "system", content: system });
   messages.push({ role: "user", content: prompt });
-  const res = await fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {}),
-    },
-    body: JSON.stringify({ model: cfg.model || "gpt-4o-mini", messages, stream: true, max_tokens: maxTokens }),
-  });
+  // OpenAI 新模型（GPT-5、o 系列）只接受 max_completion_tokens，其他相容服務多用 max_tokens；
+  // 被回「不支援此參數」時自動換另一個重試
+  const send = (param) =>
+    fetch(`${base}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {}),
+      },
+      body: JSON.stringify({ model: cfg.model || "gpt-4o-mini", messages, stream: true, [param]: Math.max(maxTokens, 16000) }),
+    });
+  let param = /api\.openai\.com/.test(base) ? "max_completion_tokens" : "max_tokens";
+  let res = await send(param);
+  if (res.status === 400) {
+    const errText = await res.clone().text().catch(() => "");
+    if (/unsupported|not supported|unrecognized|unknown|extra/i.test(errText) && errText.includes(param)) {
+      param = param === "max_tokens" ? "max_completion_tokens" : "max_tokens";
+      res = await send(param);
+    }
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new LLMError(`OpenAI 相容端點錯誤（${res.status}）：${body.slice(0, 300)}`, {

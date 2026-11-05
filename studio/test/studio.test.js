@@ -221,3 +221,31 @@ test("儲存工作流不會覆蓋較新的排程時間", () => {
   assert.equal(g.name, "s2");
   assert.equal(g.lastScheduledRun, "2026-01-02T00:00:00.000Z");
 });
+
+test("OpenAI 相容：自動切換 max_tokens / max_completion_tokens", async () => {
+  const http = await import("node:http");
+  const { postChatCompletion } = await import("../lib/llm.js");
+  // 模擬 OpenAI 新模型：只接受 max_completion_tokens
+  const seen = [];
+  const strict = http.createServer(async (req, res) => {
+    let b = "";
+    for await (const c of req) b += c;
+    const body = JSON.parse(b);
+    seen.push(Object.keys(body).find((k) => k.startsWith("max_")));
+    if ("max_tokens" in body) {
+      res.writeHead(400, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", code: "unsupported_parameter" } }));
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n');
+  });
+  await new Promise((r) => strict.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${strict.address().port}/v1`;
+  const r1 = await postChatCompletion({ base, key: "k", model: "gpt-5", messages: [{ role: "user", content: "hi" }], maxTokens: 100 });
+  assert.equal(r1.status, 200);
+  assert.deepEqual(seen, ["max_tokens", "max_completion_tokens"]);
+  // 第二次直接用記住的參數，不再先失敗
+  await postChatCompletion({ base, key: "k", model: "gpt-5", messages: [{ role: "user", content: "hi" }], maxTokens: 100 });
+  assert.deepEqual(seen.slice(2), ["max_completion_tokens"]);
+  strict.close();
+});
