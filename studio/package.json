@@ -6,7 +6,9 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/studio.test.js test/templates.test.js",
+    "test:unit": "node --test test/studio.test.js",
+    "test:ui": "node test/ui.e2e.mjs"
   },
   "engines": {
     "node": ">=20"

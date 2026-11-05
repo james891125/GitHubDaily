@@ -170,6 +170,22 @@
           <p class="hint">DeepSeek：https://api.deepseek.com/v1 · Gemini：https://generativelanguage.googleapis.com/v1beta/openai · OpenRouter：https://openrouter.ai/api/v1 · Ollama：http://localhost:11434/v1</p>
           <label>模型名稱</label><input id="s-omodel" placeholder="gpt-4o-mini / deepseek-chat / gemini-2.0-flash / llama3.1" />
         </div>
+        <h2>用量控管</h2>
+        <label>用量模式</label>
+        <select id="s-mode">
+          <option value="economy">省用量（建議）：翻譯、擷取等機械性工作使用較低思考深度</option>
+          <option value="quality">品質優先：所有工作都使用上方設定的思考深度</option>
+        </select>
+        <label>AI 回應快取</label>
+        <select id="s-cache">
+          <option value="0">不快取</option>
+          <option value="1">1 天</option>
+          <option value="7">7 天（建議）</option>
+          <option value="30">30 天</option>
+        </select>
+        <p class="hint">同樣的內容與提示在快取期間內重跑時，直接使用上次的結果，不再呼叫 API（不收費）。</p>
+        <div id="usage-box" class="usage-box"></div>
+        <div class="row"><button id="s-clear-cache" class="small">清除快取</button></div>
         <h2>學術論文（選填）</h2>
         <p class="hint">ScienceDirect 等期刊網站會擋程式直接擷取。遇到論文網址時，程式會改用 Crossref / OpenAlex 取得摘要與開放取用全文（免金鑰）。若填入 Elsevier API Key（到 <a href="https://dev.elsevier.com/" target="_blank" rel="noopener">dev.elsevier.com</a> 免費申請），在有訂閱的學校／機構網路下可取得 Elsevier 論文全文。</p>
         <label>Elsevier API Key</label><input id="s-elskey" type="password" autocomplete="off" />

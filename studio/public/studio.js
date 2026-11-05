@@ -74,6 +74,13 @@ function liveMarkdown(el) {
   };
 }
 
+/** 顯示一次任務的 AI 用量 */
+function usageText(u) {
+  if (!u || (!u.calls && !u.cached)) return "未使用 AI";
+  const tokens = (u.inputTokens + u.outputTokens).toLocaleString();
+  return `AI 呼叫 ${u.calls} 次${u.cached ? `（另有 ${u.cached} 次使用快取，未計費）` : ""} · ${u.estimated ? "約 " : ""}${tokens} tokens（輸入 ${u.inputTokens.toLocaleString()} / 輸出 ${u.outputTokens.toLocaleString()}）`;
+}
+
 const fileLinks = (files = []) => files.map((f) => `<a href="${esc(f.url)}" download>⬇️ ${esc(f.name.replace(/^\d+_/, ""))}</a>`).join("");
 const fmtSize = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : n > 1024 ? Math.round(n / 1024) + " KB" : n + " B");
 const fmtTime = (s) => (s ? new Date(s).toLocaleString("zh-TW", { hour12: false }) : "");
@@ -125,7 +132,7 @@ function segment(segEl, attr, paneAttr, onChange) {
 tabHooks.home = async () => {
   const [runs, outs] = await Promise.all([api("/api/runs"), api("/api/outputs")]);
   $("#home-runs").innerHTML = runs.length
-    ? runs.slice(0, 8).map((r) => `<div class="item"><span class="grow">${esc(r.flowName)} <span class="hint">${r.trigger === "schedule" ? "⏰ 排程" : ""} ${fmtTime(r.startedAt)}</span></span><span class="status ${r.status}">${{ success: "成功", error: "失敗", stopped: "條件停止", running: "執行中" }[r.status]}</span></div>`).join("")
+    ? runs.slice(0, 8).map((r) => `<div class="item"><span class="grow">${esc(r.flowName)} <span class="hint">${r.trigger === "schedule" ? "⏰ 排程" : ""} ${fmtTime(r.startedAt)}</span></span>${r.usage?.calls ? `<span class="hint">AI ${r.usage.calls} 次</span>` : ""}<span class="status ${r.status}">${{ success: "成功", error: "失敗", stopped: "條件停止", running: "執行中" }[r.status]}</span></div>`).join("")
     : `<p class="hint">還沒有執行紀錄。</p>`;
   $("#home-outputs").innerHTML = outs.length ? outs.slice(0, 8).map(outputItem).join("") : `<p class="hint">還沒有產出檔案。</p>`;
 };
@@ -145,7 +152,10 @@ async function loadSettings() {
   $("#s-webhook").value = s.webhookUrl;
   $("#s-elskey").value = s.elsevierKey;
   $("#s-elstoken").value = s.elsevierInstToken;
+  $("#s-mode").value = s.usageMode || "economy";
+  $("#s-cache").value = String(s.cacheDays ?? 7);
   toggleProvider();
+  loadUsage();
 }
 function toggleProvider() {
   const oa = $("#s-provider").value === "openai";
@@ -158,6 +168,15 @@ function setReady(ready) {
   $("#setup-banner").classList.toggle("hidden", ready);
 }
 $("#s-provider").addEventListener("change", toggleProvider);
+async function loadUsage() {
+  const u = await api("/api/usage");
+  const box = (title, x) => `<div>${title}<b>${x.calls.toLocaleString()} 次</b><span class="usage-note">${(x.inputTokens + x.outputTokens).toLocaleString()} tokens · 快取省下 ${x.cached} 次</span></div>`;
+  $("#usage-box").innerHTML = box("今天", u.today) + box("本月", u.month);
+}
+$("#s-clear-cache").addEventListener("click", async () => {
+  const r = await post("/api/cache/clear", {});
+  toast(`已清除 ${r.removed} 筆快取`);
+});
 async function saveSettingsForm() {
   const r = await post("/api/settings", {
     provider: $("#s-provider").value,
@@ -170,6 +189,8 @@ async function saveSettingsForm() {
     webhookUrl: $("#s-webhook").value.trim(),
     elsevierKey: $("#s-elskey").value.trim(),
     elsevierInstToken: $("#s-elstoken").value.trim(),
+    usageMode: $("#s-mode").value,
+    cacheDays: Number($("#s-cache").value),
   });
   setReady(r.ready);
   $("#s-akey").value = r.anthropicKey;
@@ -270,6 +291,7 @@ $("#doc-run").addEventListener("click", async () => {
   $("#doc-status").textContent = "處理中…";
   docAbort = new AbortController();
   const t0 = Date.now();
+  let docUsage = null;
   try {
     if (tool === "convert") {
       const r = await post("/api/doc/convert", payload);
@@ -291,6 +313,8 @@ $("#doc-run").addEventListener("click", async () => {
             bar.classList.remove("hidden");
             $("div", bar).style.width = `${Math.round((ev.done / ev.total) * 100)}%`;
             $("#doc-status").textContent = `進度 ${ev.done}/${ev.total}`;
+          } else if (ev.type === "usage") {
+            docUsage = ev.usage;
           } else if (ev.type === "done") {
             if (ev.table) live.set(`共擷取 **${ev.table.rows.length}** 筆資料\n\n` + tableMd(ev.table));
             else if (ev.output) live.set(ev.output);
@@ -300,7 +324,7 @@ $("#doc-run").addEventListener("click", async () => {
         docAbort.signal,
       );
     }
-    $("#doc-status").textContent = `✅ 完成（${((Date.now() - t0) / 1000).toFixed(1)} 秒）`;
+    $("#doc-status").textContent = `✅ 完成（${((Date.now() - t0) / 1000).toFixed(1)} 秒）· ${usageText(docUsage)}`;
   } catch (e) {
     $("#doc-status").textContent = e.name === "AbortError" ? "已停止" : "❌ " + e.message;
   } finally {
@@ -517,7 +541,7 @@ function msgHtml(m) {
   const src = (m.sources || [])
     .map((s) => `<details><summary>[${s.n}] ${esc(s.title)}${s.heading ? " ／ " + esc(s.heading) : ""}</summary><pre>${esc(s.text)}</pre></details>`)
     .join("");
-  return `<div class="msg ai"><div class="markdown">${md(m.content)}</div>${src ? `<div class="src"><b>出處</b>${src}</div>` : ""}</div>`;
+  return `<div class="msg ai"><div class="markdown">${md(m.content)}</div>${src ? `<div class="src"><b>出處</b>${src}</div>` : ""}${m.usage ? `<div class="usage-note">${esc(usageText(m.usage))}</div>` : ""}</div>`;
 }
 function renderChat() {
   const box = $("#kb-chat");
@@ -541,6 +565,7 @@ async function askKb(id) {
     await streamPost("/api/kb/ask", { kbId: id, question: q, history }, (ev) => {
       if (ev.type === "text") live.add(ev.delta);
       if (ev.type === "done") h.push({ role: "assistant", content: ev.answer, sources: ev.sources });
+      if (ev.type === "usage" && h.at(-1)?.role === "assistant") h.at(-1).usage = ev.usage;
     });
   } catch (e) {
     h.push({ role: "assistant", content: "❌ " + e.message });
@@ -839,8 +864,9 @@ async function runEditing() {
           $(".nstate", el).textContent = "⏹";
         } else if (ev.type === "done") {
           if (ev.output) live.set(ev.output);
+          const u = ev.usage ? ` · ${usageText(ev.usage)}` : "";
           $("#fl-status").textContent =
-            ev.status === "stopped" ? `⏹ 條件不成立，已停止後續節點（${((Date.now() - t0) / 1000).toFixed(1)} 秒）` : `✅ 完成（${((Date.now() - t0) / 1000).toFixed(1)} 秒）`;
+            ev.status === "stopped" ? `⏹ 條件不成立，已停止後續節點（${((Date.now() - t0) / 1000).toFixed(1)} 秒）${u}` : `✅ 完成（${((Date.now() - t0) / 1000).toFixed(1)} 秒）${u}`;
         }
       },
       flowAbort.signal,

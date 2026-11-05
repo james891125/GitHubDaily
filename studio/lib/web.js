@@ -28,14 +28,34 @@ export function htmlToMarkdown(html) {
   return turndown.turndown(document.body).replace(/\n{3,}/g, "\n\n").trim();
 }
 
-function normalizeUrl(u) {
+export function normalizeUrl(u) {
   let s = String(u || "").trim();
   if (!s) throw new Error("請輸入網址");
   if (!/^https?:\/\//i.test(s)) s = "https://" + s;
-  const url = new URL(s);
+  let url;
+  try {
+    url = new URL(s);
+  } catch {
+    throw new Error(`網址格式不正確：${String(u).slice(0, 100)}`);
+  }
+  const h = url.hostname;
+  const isIp = /^[\d.]+$/.test(h) || h.startsWith("[");
+  if (/\s/.test(String(u).trim()) || !(isIp || h === "localhost" || /^[a-z0-9\u00a1-\uffff-]+(\.[a-z0-9\u00a1-\uffff-]+)+$/i.test(h))) {
+    throw new Error(`網址格式不正確：${String(u).slice(0, 100)}`);
+  }
   url.hash = "";
   return url;
 }
+
+const NET_ERRORS = {
+  ENOTFOUND: "找不到這個網站（網域名稱可能打錯，或目前沒有網路）",
+  EAI_AGAIN: "暫時無法解析網域名稱，請檢查網路連線",
+  ECONNREFUSED: "對方伺服器拒絕連線（網站可能關閉中）",
+  ECONNRESET: "連線被對方中斷",
+  CERT_HAS_EXPIRED: "網站的 SSL 憑證已過期",
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: "無法驗證網站的 SSL 憑證",
+  DEPTH_ZERO_SELF_SIGNED_CERT: "網站使用自簽憑證，無法驗證",
+};
 
 async function fetchWithTimeout(url, { timeout = 15000, method = "GET", redirect = "follow", signal } = {}) {
   const ac = new AbortController();
@@ -46,7 +66,8 @@ async function fetchWithTimeout(url, { timeout = 15000, method = "GET", redirect
     return await fetch(url, { method, redirect, signal: ac.signal, headers: { "user-agent": UA, accept: "text/html,application/xhtml+xml,*/*;q=0.8" } });
   } catch (e) {
     if (ac.signal.aborted && !signal?.aborted) throw new Error(`連線逾時（${timeout / 1000} 秒）`);
-    throw new Error(`無法連線：${e.cause?.code || e.message}`);
+    const code = e.cause?.code || "";
+    throw new Error(`無法連線：${NET_ERRORS[code] || code || e.message}`);
   } finally {
     clearTimeout(t);
     signal?.removeEventListener("abort", onAbort);
@@ -78,13 +99,69 @@ export async function scrapePage(input, { mode = "article", signal, log = () => 
     }
     throw new Error(`HTTP ${res.status}：${BLOCKED_HINT}`);
   }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const type = res.headers.get("content-type") || "";
-  const body = await res.text();
-  if (!/html|xml/.test(type) && !/^\s*</.test(body)) {
-    return { url: res.url, title: url.pathname, markdown: body.slice(0, 200000), links: [], meta: {} };
+  if (!res.ok) throw new Error(`HTTP ${res.status}${res.status === 404 ? "：找不到此網頁" : res.status >= 500 ? "：對方伺服器發生錯誤，請稍後再試" : ""}`);
+  return readResponse(res, url, mode);
+}
+
+const DOC_TYPES = {
+  "application/pdf": ".pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+  "text/csv": ".csv",
+};
+
+/** 由回應判斷內容：網頁、文件檔（PDF/Word/Excel）、JSON 或純文字，並正確解碼各種編碼（Big5、GBK…） */
+async function readResponse(res, url, mode) {
+  const type = (res.headers.get("content-type") || "").toLowerCase();
+  const buf = Buffer.from(await res.arrayBuffer());
+  const finalUrl = res.url || url.href;
+  const disposition = res.headers.get("content-disposition") || "";
+  const nameFromHeader = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)?.[1];
+  const fileName = decodeURIComponent(nameFromHeader || new URL(finalUrl).pathname.split("/").pop() || "");
+  let ext = DOC_TYPES[type.split(";")[0].trim()] || (/\.(pdf|docx|xlsx|csv)$/i.exec(fileName)?.[0] ?? "");
+  // 依檔頭判斷（有些網站會把 PDF 標成 application/octet-stream）
+  if (!ext && buf.subarray(0, 5).toString("latin1") === "%PDF-") ext = ".pdf";
+  if (ext) {
+    const { parseDocument } = await import("./docs.js");
+    const doc = await parseDocument(fileName.toLowerCase().endsWith(ext) ? fileName : `download${ext}`, buf);
+    return { url: finalUrl, title: fileName || url.hostname, markdown: doc.text, links: [], meta: { title: fileName } };
   }
-  return parseHtmlPage(body, res.url, mode);
+  if (/^(image|video|audio)\//.test(type) || /zip|octet-stream/.test(type)) {
+    throw new Error(`此網址是二進位檔案（${type || "未知格式"}），不是網頁或可讀取的文件`);
+  }
+  const text = decodeBody(buf, type);
+  if (/json/.test(type)) {
+    try {
+      return { url: finalUrl, title: url.pathname, markdown: "```json\n" + JSON.stringify(JSON.parse(text), null, 2).slice(0, 200000) + "\n```", links: [], meta: {} };
+    } catch {
+      /* 不是合法 JSON，當作文字 */
+    }
+  }
+  if (!/html|xml/.test(type) && !/^\s*</.test(text)) {
+    return { url: finalUrl, title: url.pathname, markdown: text.slice(0, 200000), links: [], meta: {} };
+  }
+  const page = parseHtmlPage(text, finalUrl, mode);
+  if (page.markdown.replace(/[\s#*_>\-|`\[\]()!]/g, "").length < 30 && /<script/i.test(text)) {
+    throw new Error("這個網頁的內容是由 JavaScript 動態產生的，程式無法直接讀取。可以在瀏覽器開啟後按 Ctrl+S 另存網頁（或複製文字），再到「📄 文件工具」或「📁 檔案」上傳。");
+  }
+  return page;
+}
+
+/** 依 HTTP 標頭或 <meta charset> 解碼 */
+export function decodeBody(buf, contentType = "") {
+  let charset = /charset=["']?([\w-]+)/i.exec(contentType)?.[1];
+  if (!charset) {
+    const head = buf.subarray(0, 4096).toString("latin1");
+    charset = /<meta[^>]+charset=["']?([\w-]+)/i.exec(head)?.[1];
+  }
+  charset = (charset || "utf-8").toLowerCase();
+  if (charset === "big5-hkscs" || charset === "x-big5") charset = "big5";
+  if (charset === "gb2312") charset = "gbk";
+  try {
+    return new TextDecoder(charset).decode(buf).replace(/^\uFEFF/, "");
+  } catch {
+    return buf.toString("utf8").replace(/^\uFEFF/, "");
+  }
 }
 
 export function parseHtmlPage(html, pageUrl, mode = "article") {

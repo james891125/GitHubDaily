@@ -106,9 +106,11 @@ export function search(kb, query, k = 6) {
     return { c, s };
   });
   const docTitle = Object.fromEntries(kb.docs.map((d) => [d.id, d.title]));
-  return scored
-    .filter((x) => x.s > 0)
-    .sort((a, b2) => b2.s - a.s)
+  const ranked = scored.filter((x) => x.s > 0).sort((a, b2) => b2.s - a.s);
+  // 相關度遠低於第一名的段落對回答幫助不大，卻會增加 token，直接略過
+  const floor = (ranked[0]?.s || 0) * 0.3;
+  return ranked
+    .filter((x) => x.s >= floor)
     .slice(0, k)
     .map(({ c, s }) => ({ id: c.id, docId: c.docId, title: docTitle[c.docId], heading: c.heading, text: c.text, score: Math.round(s * 100) / 100 }));
 }
@@ -117,7 +119,7 @@ export function search(kb, query, k = 6) {
  * 問答：檢索 → 讓 LLM 依據資料回答並標註 [1] [2] 出處
  * history: [{role, content}]（最近幾輪對話，用來理解追問）
  */
-export async function ask(kbId, question, { history = [], k = 6, onText = () => {}, signal } = {}) {
+export async function ask(kbId, question, { history = [], k = 5, onText = () => {}, signal } = {}) {
   const kb = getKb(kbId);
   // 追問時把上一題一併納入檢索
   const lastUser = [...history].reverse().find((m) => m.role === "user")?.content || "";
@@ -133,7 +135,8 @@ export async function ask(kbId, question, { history = [], k = 6, onText = () => 
 - 資料不足以回答時，直接說「知識庫中沒有相關資訊」，並說明缺少什麼，不要自行猜測或編造。
 - 回答精簡、有條理，可用 Markdown 條列或表格。`;
   const messages = [
-    ...history.slice(-6),
+    // 只帶最近 2 輪對話（足以理解追問），避免每次重送整段歷史
+    ...history.slice(-4).map((m) => ({ role: m.role, content: String(m.content).slice(0, 2000) })),
     { role: "user", content: `參考資料：\n\n${context}\n\n---\n\n問題：${question}` },
   ];
   const { text } = await generate({ system, messages, maxTokens: 8000 }, onText, signal);

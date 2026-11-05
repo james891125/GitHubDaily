@@ -300,3 +300,53 @@ test("PDF 字型路徑：Windows 路徑轉成 pdf.js 接受的格式", () => {
   assert.equal(docs.toPdfjsDir("C:\\Users\\me\\studio\\node_modules\\pdfjs-dist\\cmaps", "\\"), "C:/Users/me/studio/node_modules/pdfjs-dist/cmaps/");
   assert.equal(docs.toPdfjsDir("/opt/studio/cmaps", "/"), "/opt/studio/cmaps/");
 });
+
+// ================= Windows 情境 =================
+test("Windows：\\r\\n 換行的文字檔能正確分段", async () => {
+  const text = Array.from({ length: 20 }, (_, i) => `第${i}段。` + "內容".repeat(80)).join("\r\n\r\n");
+  const r = await docs.parseDocument("windows.txt", Buffer.from(text));
+  assert.ok(!r.text.includes("\r"));
+  const chunks = docs.chunkText(r.text, { maxChars: 500 });
+  assert.ok(chunks.length >= 10, `應切成多段，實際 ${chunks.length}`);
+  assert.ok(chunks.every((c) => c.text.length <= 700));
+  assert.equal(docs.splitForProcessing(text, 1000).length > 3, true);
+});
+
+test("Windows：Excel 另存的 Big5 CSV 與 UTF-16 文字檔能正確解碼", async () => {
+  const dec = new TextDecoder("big5");
+  // 用 Big5 編碼「王小明」：反查表
+  const enc = (s) => {
+    const out = [];
+    for (const ch of s) {
+      if (ch.charCodeAt(0) < 128) {
+        out.push(ch.charCodeAt(0));
+        continue;
+      }
+      search: for (let hi = 0xa1; hi <= 0xf9; hi++)
+        for (let lo = 0x40; lo <= 0xfe; lo++)
+          if (dec.decode(Buffer.from([hi, lo])) === ch) {
+            out.push(hi, lo);
+            break search;
+          }
+    }
+    return Buffer.from(out);
+  };
+  const big5 = await docs.parseDocument("名單.csv", enc("姓名,電話\r\n王小明,0912\r\n"));
+  assert.match(big5.text, /王小明,0912/);
+  const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("退款十四天", "utf16le")]);
+  assert.equal((await docs.parseDocument("a.txt", utf16)).text, "退款十四天");
+});
+
+test("Windows：產出檔名移除非法字元、保留副檔名、不超過長度", () => {
+  const long = "非常".repeat(200) + ".md";
+  const n = store.safeFileName(long);
+  assert.ok(n.endsWith(".md"));
+  assert.ok([...n].length <= 104);
+  assert.ok(Buffer.byteLength(n) <= 210, "檔名位元組數須在 255 以內");
+  assert.equal(store.safeFileName('報告: A/B*C?"<>|.md'), "報告_A_B_C_.md");
+  assert.equal(store.safeFileName("結尾有點...."), "結尾有點");
+  assert.equal(store.safeFileName("翻譯-zh-TW.MD"), "翻譯-zh-TW.md");
+  const f = store.writeOutput("一篇標題非常長的文章".repeat(30) + "-zh-TW.md", "x");
+  assert.ok(f.name.endsWith(".md"));
+  assert.ok(store.outputPath(f.name));
+});

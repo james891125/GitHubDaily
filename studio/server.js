@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getSettings, saveSettings, publicSettings, listOutputs, outputPath, load } from "./lib/store.js";
-import { generate, CLAUDE_MODELS, llmReady } from "./lib/llm.js";
+import { generate, CLAUDE_MODELS, llmReady, withUsage, usageSummary, clearCache } from "./lib/llm.js";
 import { parseDocument, SUPPORTED } from "./lib/docs.js";
 import { translate, summarize, extractTable, toCsv, toXlsx, LANGUAGES } from "./lib/doctools.js";
 import { writeOutput } from "./lib/store.js";
@@ -46,14 +46,17 @@ function stream(req, res) {
   return { send, signal: ac.signal, end: () => res.end() };
 }
 
-/** 包裝串流任務：錯誤一律以事件回報 */
+/** 包裝串流任務：錯誤一律以事件回報；並統計這次任務的 AI 用量 */
 async function streamTask(req, res, fn) {
   const s = stream(req, res);
-  try {
-    await fn(s);
-  } catch (e) {
-    s.send({ type: "error", message: e.message });
-  }
+  const { usage } = await withUsage(async () => {
+    try {
+      await fn(s);
+    } catch (e) {
+      s.send({ type: "error", message: e.message });
+    }
+  });
+  s.send({ type: "usage", usage });
   s.end();
 }
 
@@ -86,13 +89,15 @@ const routes = {
   },
   "POST /api/settings/test": async (req, res) => {
     try {
-      const r = await generate({ prompt: "請只回覆「連線成功」。", maxTokens: 2000 });
+      const r = await generate({ prompt: "請只回覆「連線成功」。", maxTokens: 2000, light: true, noCache: true });
       json(res, 200, { ok: true, text: r.text.trim(), model: r.model });
     } catch (e) {
       json(res, 200, { ok: false, error: e.message });
     }
   },
   "GET /api/outputs": (req, res) => json(res, 200, listOutputs()),
+  "GET /api/usage": (req, res) => json(res, 200, usageSummary()),
+  "POST /api/cache/clear": (req, res) => json(res, 200, { removed: clearCache() }),
 
   // ---- 檔案庫 ----
   "GET /api/files": (req, res) => json(res, 200, flow.listFiles()),
@@ -282,7 +287,9 @@ const server = http.createServer(async (req, res) => {
 
 export { server };
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// 直接執行（node server.js）時才啟動；Windows 上磁碟代號大小寫可能不同，所以不分大小寫比較
+const sameFile = (a, b) => (process.platform === "win32" ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
+if (process.argv[1] && sameFile(process.argv[1], fileURLToPath(import.meta.url))) {
   server.listen(PORT, HOST, () => {
     console.log(`\n  🧪 AI 工作坊已啟動：http://${HOST}:${PORT}\n`);
     if (!llmReady()) console.log("  尚未設定 API Key —— 請在網頁的「設定」頁輸入。\n");

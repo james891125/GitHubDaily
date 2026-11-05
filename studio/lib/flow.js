@@ -3,9 +3,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { load, save, newId, writeOutput, DATA_DIR } from "./store.js";
-import { generate } from "./llm.js";
+import { generate, generateJson, withUsage, currentUsage } from "./llm.js";
 import { scrapePage, crawlSite, checkSite, reportToMarkdown } from "./web.js";
-import { translate, summarize, extractTable, toCsv, toXlsx, toMarkdownTable } from "./doctools.js";
+import { translate, summarize, extractTable, toCsv, toXlsx, toMarkdownTable, compactText, chunkLimits } from "./doctools.js";
 import { parseDocument } from "./docs.js";
 import * as kb from "./kb.js";
 
@@ -48,7 +48,7 @@ export const NODE_TYPES = {
   kb_search: {
     label: "🔎 知識庫檢索",
     desc: "從知識庫找出與問題最相關的段落",
-    fields: { kbId: { label: "知識庫", type: "kb", default: "" }, query: { label: "查詢", type: "text", default: "{{input}}" }, k: { label: "段落數", type: "number", default: 6 } },
+    fields: { kbId: { label: "知識庫", type: "kb", default: "" }, query: { label: "查詢", type: "text", default: "{{input}}" }, k: { label: "段落數", type: "number", default: 4 } },
     out: "context",
   },
   kb_add: {
@@ -144,8 +144,8 @@ export function stringify(v) {
   if (v == null) return "";
   if (typeof v === "string") return v;
   if (typeof v === "number" || typeof v === "boolean") return String(v);
-  if (v.__type === "page") return `# ${v.title}\n來源：${v.url}\n\n${v.markdown}`;
-  if (v.__type === "site") return v.pages.map((p) => `# ${p.title}\n來源：${p.url}\n\n${p.markdown}`).join("\n\n---\n\n");
+  if (v.__type === "page") return `# ${v.title}\n來源：${v.url}\n\n${compactText(v.markdown)}`;
+  if (v.__type === "site") return v.pages.map((p) => `# ${p.title}\n來源：${p.url}\n\n${compactText(p.markdown)}`).join("\n\n---\n\n");
   if (v.__type === "table") return toMarkdownTable(v);
   if (v.__type === "doc") return v.text;
   if (v.__type === "check") return v.markdown;
@@ -287,25 +287,68 @@ async function runNode(node, vars, ctx) {
     case "llm_each": {
       const list = toList(resolveRaw(node.list, vars)).slice(0, 50);
       log(`共 ${list.length} 項`);
-      const results = [];
+      // 1. 先取得每一項的內容（網址就先擷取）
+      const items = [];
+      const results = new Array(list.length);
       for (const [i, item] of list.entries()) {
         if (signal?.aborted) throw new Error("已取消");
         let content = item;
         if (node.fetch && /^https?:\/\//.test(item)) {
           try {
             const p = await scrapePage(item, { signal, log });
-            content = `# ${p.title}\n來源：${p.url}\n\n${p.markdown.slice(0, 30000)}`;
+            content = `# ${p.title}\n來源：${p.url}\n\n${compactText(p.markdown).slice(0, 30000)}`;
           } catch (e) {
-            results.push({ item, output: `（擷取失敗：${e.message}）` });
+            results[i] = { item, output: `（擷取失敗：${e.message}）` };
             log(`✗ ${i + 1}/${list.length} ${e.message}`);
             continue;
           }
         }
-        const { text } = await generate({ prompt: render(node.prompt, { ...vars, item: content, index: i + 1 }), system: "請使用繁體中文回答。" }, undefined, signal);
-        results.push({ item, output: text });
-        log(`✓ ${i + 1}/${list.length}`);
+        items.push({ i, item, content });
       }
-      return { __type: "items", results };
+      // 2. 合併成批次，一次請 AI 處理多項（N 項通常只需 1 次呼叫，而不是 N 次）
+      const budget = Math.min(chunkLimits().extract, 60000);
+      const batches = [];
+      let cur = [];
+      let size = 0;
+      for (const it of items) {
+        if (cur.length && (size + it.content.length > budget || cur.length >= 20)) {
+          batches.push(cur);
+          cur = [];
+          size = 0;
+        }
+        cur.push(it);
+        size += it.content.length;
+      }
+      if (cur.length) batches.push(cur);
+      const schema = { type: "object", properties: { results: { type: "array", items: { type: "string" } } }, required: ["results"], additionalProperties: false };
+      for (const batch of batches) {
+        if (signal?.aborted) throw new Error("已取消");
+        let outputs = null;
+        if (batch.length > 1) {
+          const blocks = batch.map((it, k) => `<item id="${k + 1}">\n${render(node.prompt, { ...vars, item: it.content, index: it.i + 1 })}\n</item>`).join("\n\n");
+          try {
+            const data = await generateJson(
+              `以下有 ${batch.length} 個獨立的工作，請分別完成每一個 <item> 中的要求，彼此不要混用內容。\n輸出 {"results":["第1項的結果","第2項的結果",...]}，共 ${batch.length} 個字串，順序與 id 相同；每個結果可使用 Markdown。\n\n${blocks}`,
+              { system: "請使用繁體中文回答。", schema, light: false, signal },
+            );
+            if (Array.isArray(data.results) && data.results.length === batch.length) outputs = data.results.map(String);
+            else log("AI 回傳的項目數量不符，改為逐項處理");
+          } catch (e) {
+            if (signal?.aborted) throw e;
+            log(`批次處理失敗（${e.message}），改為逐項處理`);
+          }
+        }
+        if (!outputs) {
+          outputs = [];
+          for (const it of batch) {
+            const { text } = await generate({ prompt: render(node.prompt, { ...vars, item: it.content, index: it.i + 1 }), system: "請使用繁體中文回答。" }, undefined, signal);
+            outputs.push(text);
+          }
+        }
+        batch.forEach((it, k) => (results[it.i] = { item: it.item, output: outputs[k] }));
+        log(`✓ 已完成 ${results.filter(Boolean).length}/${list.length}（本批 ${batch.length} 項，1 次呼叫）`);
+      }
+      return { __type: "items", results: results.filter(Boolean) };
     }
     case "translate":
       return translate(stringify(resolveRaw(node.source, vars)), { target: node.target, onText, onProgress: progress, signal });
@@ -384,7 +427,21 @@ async function runNode(node, vars, ctx) {
 /**
  * 執行工作流。emit 事件：node-start / log / text / file / node-done / node-error / stopped / done
  */
-export async function runFlow(flow, { input = "", emit = () => {}, signal, settings = {}, trigger = "manual" } = {}) {
+export async function runFlow(flow, opts = {}) {
+  const { result, usage } = await withUsage(() => runFlowInner(flow, opts));
+  result.usage = usage;
+  // 把用量補記到執行紀錄
+  const runs = load("runs", []);
+  const r = runs.find((x) => x.id === result.id);
+  if (r) {
+    r.usage = usage;
+    save("runs", runs);
+  }
+  opts.emit?.({ type: "usage", usage });
+  return result;
+}
+
+async function runFlowInner(flow, { input = "", emit = () => {}, signal, settings = {}, trigger = "manual" } = {}) {
   const now = new Date();
   const vars = {
     input,
@@ -422,7 +479,7 @@ export async function runFlow(flow, { input = "", emit = () => {}, signal, setti
     }
     if (run.status === "running") run.status = "success";
     run.output = stringify(lastOutput).slice(0, 200000);
-    record({ type: "done", status: run.status, output: run.output, files: run.files });
+    record({ type: "done", status: run.status, output: run.output, files: run.files, usage: { ...(currentUsage() || {}) } });
   } catch (e) {
     run.status = "error";
     run.error = e.message;
@@ -504,7 +561,7 @@ export const TEMPLATES = [
     nodes: [
       { id: "n1", type: "fetch_url", url: "{{input}}", mode: "article", out: "page" },
       { id: "n2", type: "translate", source: "{{page}}", target: "zh-TW", out: "translated" },
-      { id: "n3", type: "summarize", source: "{{translated}}", style: "三到五點重點條列", out: "summary" },
+      { id: "n3", type: "summarize", source: "{{page}}", style: "三到五點重點條列，使用繁體中文", out: "summary" },
       { id: "n4", type: "set", value: "# {{page.title}}\n\n原文：{{page.url}}\n\n## 摘要\n\n{{summary}}\n\n## 全文翻譯\n\n{{translated}}", out: "text" },
       { id: "n5", type: "save_file", source: "{{text}}", format: "md", filename: "翻譯-{{today}}", out: "file" },
     ],

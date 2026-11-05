@@ -1,6 +1,10 @@
 // LLM 呼叫層：Anthropic Claude（官方 SDK）或任何 OpenAI 相容端點
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import Anthropic from "@anthropic-ai/sdk";
-import { getSettings } from "./store.js";
+import { getSettings, load, save, DATA_DIR } from "./store.js";
 
 export const CLAUDE_MODELS = [
   { id: "claude-opus-5-5", label: "Claude Opus 5.5（最佳品質，預設）" },
@@ -26,9 +30,114 @@ export function llmReady(s = getSettings()) {
   return !!s.anthropicKey;
 }
 
+// ================= 用量控管 =================
+// 1. 回應快取：同樣的請求（模型、提示、設定都相同）在有效期內直接使用上次結果，不再呼叫 API
+// 2. 用量統計：每次呼叫記錄 token 數，可依「單次執行」與「每日」查看
+// 3. 省用量模式：翻譯、擷取、逐項處理等機械性工作使用較低的思考深度（思考 token 也要計費）
+const CACHE_DIR = path.join(DATA_DIR, "llm-cache");
+fs.mkdirSync(CACHE_DIR, { recursive: true });
+const usageScope = new AsyncLocalStorage();
+
+/** 在 fn 執行期間統計所有 AI 呼叫，回傳 { result, usage } */
+export async function withUsage(fn) {
+  const tally = { calls: 0, cached: 0, inputTokens: 0, outputTokens: 0, estimated: false };
+  const parent = usageScope.getStore();
+  try {
+    const result = await usageScope.run(tally, fn);
+    return { result, usage: tally };
+  } finally {
+    // 巢狀統計：內層的用量也要算進外層
+    if (parent) for (const k of ["calls", "cached", "inputTokens", "outputTokens"]) parent[k] += tally[k];
+    if (parent && tally.estimated) parent.estimated = true;
+  }
+}
+export function currentUsage() {
+  return usageScope.getStore() || null;
+}
+
+function recordUsage({ cached, input = 0, output = 0, estimated = false }) {
+  const t = usageScope.getStore();
+  if (t) {
+    if (cached) t.cached++;
+    else t.calls++;
+    t.inputTokens += input;
+    t.outputTokens += output;
+    t.estimated ||= estimated;
+  }
+  const day = new Date().toLocaleDateString("sv-SE");
+  const all = load("usage", {});
+  const d = (all[day] ||= { calls: 0, cached: 0, inputTokens: 0, outputTokens: 0 });
+  if (cached) d.cached++;
+  else d.calls++;
+  d.inputTokens += input;
+  d.outputTokens += output;
+  // 只保留最近 90 天
+  const keys = Object.keys(all).sort();
+  for (const k of keys.slice(0, Math.max(0, keys.length - 90))) delete all[k];
+  save("usage", all);
+}
+
+export function usageSummary() {
+  const all = load("usage", {});
+  const today = new Date().toLocaleDateString("sv-SE");
+  const month = today.slice(0, 7);
+  const sum = (filter) =>
+    Object.entries(all)
+      .filter(([k]) => filter(k))
+      .reduce((a, [, v]) => ({ calls: a.calls + v.calls, cached: a.cached + v.cached, inputTokens: a.inputTokens + v.inputTokens, outputTokens: a.outputTokens + v.outputTokens }), { calls: 0, cached: 0, inputTokens: 0, outputTokens: 0 });
+  return { today: sum((k) => k === today), month: sum((k) => k.startsWith(month)), days: all };
+}
+
+const estimateTokens = (text) => {
+  const s = String(text || "");
+  const cjk = (s.match(/[\u3400-\u9fff\uac00-\ud7af\u3040-\u30ff]/g) || []).length;
+  return Math.ceil(cjk * 1.1 + (s.length - cjk) / 4);
+};
+
+function cacheKey(s, req) {
+  const provider = s.provider === "openai" ? `openai|${s.openaiBase}|${req.model || s.openaiModel}` : `anthropic|${req.model || s.claudeModel}|${effortFor(s, req)}`;
+  return crypto.createHash("sha256").update(JSON.stringify([provider, req.system || "", req.messages, req.maxTokens || 0, req.schema || null])).digest("hex");
+}
+
+function readCache(key, days) {
+  if (!days) return null;
+  try {
+    const f = path.join(CACHE_DIR, key + ".json");
+    const st = fs.statSync(f);
+    if (Date.now() - st.mtimeMs > days * 86400000) return null;
+    return JSON.parse(fs.readFileSync(f, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function writeCache(key, value) {
+  try {
+    fs.writeFileSync(path.join(CACHE_DIR, key + ".json"), JSON.stringify(value));
+  } catch {
+    /* 快取寫入失敗不影響結果 */
+  }
+}
+export function clearCache() {
+  let n = 0;
+  for (const f of fs.readdirSync(CACHE_DIR)) {
+    fs.rmSync(path.join(CACHE_DIR, f), { force: true });
+    n++;
+  }
+  return n;
+}
+
+/** 決定思考深度：使用者有指定就用指定的；省用量模式下，機械性工作用 low */
+function effortFor(s, req) {
+  if (req.light && s.usageMode !== "quality") return "low";
+  return s.effort || "";
+}
+
 /**
  * 產生文字（串流）。
- * @param {{system?:string, prompt?:string, messages?:Array, maxTokens?:number, model?:string}} req
+ * @param {{system?:string, prompt?:string, messages?:Array, maxTokens?:number, model?:string,
+ *          light?:boolean, schema?:object, noCache?:boolean}} req
+ *   light：機械性工作（翻譯、擷取…），省用量模式下降低思考深度
+ *   schema：要求 JSON 結構（Claude 會以結構化輸出保證格式，免去重試）
  * @param {(delta:string)=>void} [onText]
  * @param {AbortSignal} [signal]
  */
@@ -36,19 +145,36 @@ export async function generate(req, onText = () => {}, signal) {
   const s = getSettings();
   if (!llmReady(s)) throw new LLMError("尚未設定 API Key，請先到「設定」頁輸入你的金鑰。", 401);
   const messages = req.messages || [{ role: "user", content: req.prompt }];
-  if (s.provider === "openai") return openaiChat(s, { ...req, messages }, onText, signal);
-  return claudeChat(s, { ...req, messages }, onText, signal);
+  const full = { ...req, messages };
+  const days = req.noCache ? 0 : Number(s.cacheDays ?? 7);
+  const key = cacheKey(s, full);
+  const hit = readCache(key, days);
+  if (hit) {
+    onText(hit.text);
+    recordUsage({ cached: true });
+    return { ...hit, cached: true };
+  }
+  const r = s.provider === "openai" ? await openaiChat(s, full, onText, signal) : await claudeChat(s, full, onText, signal);
+  recordUsage({ input: r.inputTokens, output: r.outputTokens, estimated: r.estimated });
+  // 只有開啟快取時才寫入；被截斷的回應不快取
+  if (days && !r.truncated) writeCache(key, { text: r.text, model: r.model });
+  return r;
 }
 
-async function claudeChat(s, { system, messages, maxTokens = 32000, model }, onText, signal) {
+async function claudeChat(s, { system, messages, maxTokens = 32000, model, schema, ...req }, onText, signal) {
   const client = new Anthropic({ apiKey: s.anthropicKey });
   const m = model || s.claudeModel || "claude-opus-5-5";
+  const effort = effortFor(s, req);
+  const output_config = {
+    ...(effort ? { effort } : {}),
+    ...(schema ? { format: { type: "json_schema", schema } } : {}),
+  };
   const params = {
     model: m,
     max_tokens: maxTokens,
     messages,
     ...(system ? { system } : {}),
-    ...(s.effort ? { output_config: { effort: s.effort } } : {}),
+    ...(Object.keys(output_config).length ? { output_config } : {}),
   };
   const useFallback = FALLBACK_MODELS.has(m);
   if (useFallback) {
@@ -64,12 +190,21 @@ async function claudeChat(s, { system, messages, maxTokens = 32000, model }, onT
     });
     const final = await stream.finalMessage();
     if (final.stop_reason === "refusal") throw new LLMError("模型拒絕了此請求，請調整內容後重試。", 200);
+    let truncated = false;
     if (final.stop_reason === "max_tokens") {
+      truncated = true;
       const note = "\n\n> ⚠️ 輸出達到長度上限而被截斷。";
       text += note;
       onText(note);
     }
-    return { text, model: final.model, usage: final.usage };
+    const u = final.usage || {};
+    return {
+      text,
+      model: final.model,
+      truncated,
+      inputTokens: (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0),
+      outputTokens: u.output_tokens || 0,
+    };
   } catch (e) {
     if (e instanceof LLMError) throw e;
     if (e instanceof Anthropic.AuthenticationError) throw new LLMError("Claude API Key 無效（401）。", 401);
@@ -93,6 +228,7 @@ const tokenParamCache = new Map();
  * 先依端點猜一個，若被回「不支援此參數」就自動換另一個重試。
  */
 export async function postChatCompletion({ base, key, model, messages, maxTokens, signal }) {
+  const official = /api\.openai\.com/.test(base);
   const cacheKey = `${base}|${model}`;
   const first = tokenParamCache.get(cacheKey) || (/api\.openai\.com/.test(base) ? "max_completion_tokens" : "max_tokens");
   const send = (param) =>
@@ -100,7 +236,7 @@ export async function postChatCompletion({ base, key, model, messages, maxTokens
       method: "POST",
       signal,
       headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
-      body: JSON.stringify({ model, messages, stream: true, [param]: maxTokens }),
+      body: JSON.stringify({ model, messages, stream: true, [param]: maxTokens, ...(official ? { stream_options: { include_usage: true } } : {}) }),
     });
   let param = first;
   let res = await send(param);
@@ -114,18 +250,29 @@ export async function postChatCompletion({ base, key, model, messages, maxTokens
       throw new LLMError(`API 錯誤（400）：${errText.slice(0, 300)}`, 400);
     }
   }
-  if (!res.ok) throw new LLMError(`API 錯誤（${res.status}）：${(await res.text().catch(() => "")).slice(0, 300)}`, res.status);
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => "")).slice(0, 300);
+    const friendly = {
+      401: "API Key 無效或未填寫（401）",
+      403: "此 API Key 沒有權限使用這個模型（403）",
+      404: `找不到模型「${model}」或 Base URL 錯誤（404）`,
+      429: "已達速率限制或額度用完（429），請稍後再試或檢查帳戶餘額",
+    }[res.status];
+    throw new LLMError(friendly ? `${friendly}。伺服器訊息：${detail}` : `API 錯誤（${res.status}）：${detail}`, res.status);
+  }
   tokenParamCache.set(cacheKey, param);
   return res;
 }
 
-async function openaiChat(s, { system, messages, maxTokens = 16000, model }, onText, signal) {
+async function openaiChat(s, { system, messages, maxTokens = 16000, model, schema }, onText, signal) {
   const base = (s.openaiBase || "https://api.openai.com/v1").replace(/\/+$/, "");
   const msgs = system ? [{ role: "system", content: system }, ...messages] : messages;
   // 推理模型的思考也算在長度上限內，所以預設給大一點
   const res = await postChatCompletion({ base, key: s.openaiKey, model: model || s.openaiModel, messages: msgs, maxTokens, signal });
   let text = "";
   let buf = "";
+  let usage = null;
+  let finish = null;
   const dec = new TextDecoder();
   for await (const chunk of res.body) {
     buf += dec.decode(chunk, { stream: true });
@@ -135,7 +282,11 @@ async function openaiChat(s, { system, messages, maxTokens = 16000, model }, onT
       buf = buf.slice(i + 1);
       if (!line.startsWith("data:") || line.includes("[DONE]")) continue;
       try {
-        const d = JSON.parse(line.slice(5)).choices?.[0]?.delta?.content;
+        const j = JSON.parse(line.slice(5));
+        if (j.usage) usage = j.usage;
+        const c = j.choices?.[0];
+        if (c?.finish_reason) finish = c.finish_reason;
+        const d = c?.delta?.content;
         if (d) {
           text += d;
           onText(d);
@@ -145,7 +296,21 @@ async function openaiChat(s, { system, messages, maxTokens = 16000, model }, onT
       }
     }
   }
-  return { text, model: model || s.openaiModel };
+  const truncated = finish === "length";
+  if (truncated) {
+    const note = "\n\n> ⚠️ 輸出達到長度上限而被截斷。";
+    text += note;
+    onText(note);
+  }
+  void schema;
+  return {
+    text,
+    model: model || s.openaiModel,
+    truncated,
+    inputTokens: usage?.prompt_tokens ?? estimateTokens(msgs.map((m) => m.content).join("\n")),
+    outputTokens: usage?.completion_tokens ?? estimateTokens(text),
+    estimated: !usage,
+  };
 }
 
 /** 擷取模型輸出中的 JSON（容許 ```json 區塊與前後說明文字） */
@@ -163,19 +328,25 @@ export function extractJson(text) {
   }
 }
 
-/** 要求 JSON 輸出，失敗時重試一次 */
-export async function generateJson(prompt, { system, maxTokens = 16000, signal } = {}) {
+/**
+ * 要求 JSON 輸出。
+ * - Claude：以結構化輸出（json_schema）保證格式，不需重試
+ * - 其他：以提示要求 JSON，解析失敗才重試一次
+ */
+export async function generateJson(prompt, { system, maxTokens = 16000, signal, schema, light = true } = {}) {
+  const s = getSettings();
   const sys = (system ? system + "\n" : "") + "只輸出合法的 JSON，不要加任何說明文字。";
-  let { text } = await generate({ system: sys, prompt, maxTokens }, undefined, signal);
+  const useSchema = schema && s.provider !== "openai";
+  let { text } = await generate({ system: sys, prompt, maxTokens, light, ...(useSchema ? { schema } : {}) }, undefined, signal);
   let data = extractJson(text);
-  if (data === null) {
+  if (data === null && !useSchema) {
     ({ text } = await generate(
-      { system: sys, messages: [{ role: "user", content: prompt }, { role: "assistant", content: text }, { role: "user", content: "上面的輸出不是合法 JSON，請只輸出 JSON。" }], maxTokens },
+      { system: sys, messages: [{ role: "user", content: prompt }, { role: "assistant", content: text }, { role: "user", content: "上面的輸出不是合法 JSON，請只輸出 JSON。" }], maxTokens, light },
       undefined,
       signal,
     ));
     data = extractJson(text);
   }
-  if (data === null) throw new LLMError("AI 回傳的內容無法解析為 JSON。", 422);
+  if (data === null) throw new LLMError("AI 回傳的內容不是正確的 JSON 格式，請再試一次或換一個模型。", 422);
   return data;
 }

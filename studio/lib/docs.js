@@ -3,7 +3,7 @@ import path from "node:path";
 import mammoth from "mammoth";
 import ExcelJS from "exceljs";
 import { createRequire } from "node:module";
-import { htmlToMarkdown } from "./web.js";
+import { htmlToMarkdown, decodeBody } from "./web.js";
 
 // pdf.js 需要 CMap 與標準字型檔才能正確擷取中日韓文字
 const require = createRequire(import.meta.url);
@@ -85,6 +85,15 @@ async function xlsxToText(buf) {
  * @returns {Promise<{text:string, kind:string, pages?:number}>}
  */
 export async function parseDocument(filename, buf) {
+  if (!buf?.length) throw new Error("檔案是空的，沒有可處理的內容");
+  const r = await parseDocumentInner(filename, buf);
+  // Windows 的換行是 \r\n，統一成 \n，才能正確分段
+  r.text = r.text.replace(/\r\n?/g, "\n");
+  if (!r.text.replace(/<!--.*?-->/g, "").trim()) throw new Error("檔案中沒有可擷取的文字內容");
+  return r;
+}
+
+async function parseDocumentInner(filename, buf) {
   const ext = path.extname(filename).toLowerCase();
   switch (ext) {
     case ".pdf": {
@@ -102,15 +111,28 @@ export async function parseDocument(filename, buf) {
       return { text: await xlsxToText(buf), kind: "xlsx" };
     case ".html":
     case ".htm":
-      return { text: htmlToMarkdown(buf.toString("utf8")), kind: "html" };
+      return { text: htmlToMarkdown(decodeBody(buf)), kind: "html" };
     case ".csv":
     case ".txt":
     case ".md":
     case ".markdown":
     case ".json":
-      return { text: buf.toString("utf8").replace(/^﻿/, ""), kind: ext.slice(1) };
+      return { text: decodeText(buf), kind: ext.slice(1) };
     default:
       throw new Error(`不支援的檔案格式：${ext || "（無副檔名）"}。支援：${SUPPORTED.join("、")}`);
+  }
+}
+
+/**
+ * 文字檔解碼：UTF-8（含 BOM）、UTF-16，或台灣 Windows 常見的 Big5（例如 Excel 另存的 CSV）
+ */
+export function decodeText(buf) {
+  if (buf[0] === 0xff && buf[1] === 0xfe) return new TextDecoder("utf-16le").decode(buf.subarray(2));
+  if (buf[0] === 0xfe && buf[1] === 0xff) return new TextDecoder("utf-16be").decode(buf.subarray(2));
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(buf).replace(/^\uFEFF/, "");
+  } catch {
+    return new TextDecoder("big5").decode(buf);
   }
 }
 
@@ -119,7 +141,7 @@ export async function parseDocument(filename, buf) {
  * @returns {Array<{text:string, heading:string, index:number}>}
  */
 export function chunkText(text, { maxChars = 1200, overlap = 150 } = {}) {
-  const paras = text.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+  const paras = text.replace(/\r\n?/g, "\n").split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
   const chunks = [];
   let heading = "";
   let cur = "";
@@ -156,7 +178,7 @@ export function chunkText(text, { maxChars = 1200, overlap = 150 } = {}) {
 
 /** 長文切成較大的段（給翻譯、摘要用），盡量在段落邊界切 */
 export function splitForProcessing(text, maxChars = 6000) {
-  const paras = text.split(/\n{2,}/);
+  const paras = text.replace(/\r\n?/g, "\n").split(/\n{2,}/);
   const out = [];
   let cur = "";
   for (const p of paras) {
