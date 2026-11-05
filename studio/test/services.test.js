@@ -2,14 +2,23 @@
 import { test, before, after, describe } from "node:test";
 import assert from "node:assert/strict";
 import ExcelJS from "exceljs";
-import { startStack, last, cleanCheck } from "./helpers.js";
+import { startStack, last, cleanCheck, makePdf } from "./helpers.js";
 import { SERVICES } from "../lib/services.js";
 import { parseDocument } from "../lib/docs.js";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import sharp from "sharp";
+import JSZip from "jszip";
+import { PDFDocument } from "pdf-lib";
+import { findFfmpeg } from "../lib/audio.js";
 
 let S;
 const tested = new Set();
 before(async () => {
-  S = await startStack();
+  // 音檔上限調小到 0.25 MB，以短音檔測試自動分段
+  S = await startStack({ env: { STUDIO_AUDIO_LIMIT_MB: "0.25" } });
 });
 after(() => S?.close());
 
@@ -37,6 +46,13 @@ async function run(id, form) {
 const ok = (r) => assert.equal(r.status, "success", r.error?.message || JSON.stringify(r.events.slice(-3)));
 const docText = async (file) => (await parseDocument(file.name, await S.download(file))).text;
 const text = (t) => ({ kind: "text", text: t });
+/** 以內建 ffmpeg 產生測試用的純音音檔 */
+function tone(sec, ext = "wav") {
+  const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tone-")), "t." + ext);
+  const r = spawnSync(findFfmpeg(), ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `sine=frequency=440:duration=${sec}`, "-ar", "16000", "-ac", "1", out]);
+  assert.equal(r.status, 0, String(r.stderr));
+  return fs.readFileSync(out);
+}
 
 describe("文書行政", () => {
   before(useClaude);
@@ -277,15 +293,40 @@ describe("影音與圖片", () => {
     ok(r);
     assert.ok(S.world.openai.media.at(-1).audio);
     assert.match(await docText(r.files[0]), /這是音訊轉寫的結果/);
-    const m4a = await S.api("/api/files", { name: "錄音.m4a", data: Buffer.from("fake m4a").toString("base64") });
+    // M4A 等格式由內建 ffmpeg 自動轉成 MP3 再送出
+    const m4a = await S.uploadBuf("錄音.m4a", tone(5, "m4a"));
+    const before = S.world.openai.media.length;
     r = await run("transcribe", { file: m4a.id });
-    assert.match(r.error.message, /只接受 MP3 或 WAV/);
+    ok(r);
+    assert.equal(S.world.openai.media.length - before, 1);
+    assert.match(r.events.filter((e) => e.type === "log").map((e) => e.message).join("\n"), /轉換為語音專用格式/);
+    // 損毀的音檔：清楚說明
+    const bad = await S.api("/api/files", { name: "壞掉.m4a", data: Buffer.from("fake m4a").toString("base64") });
+    r = await run("transcribe", { file: bad.id });
+    assert.match(r.error.message, /音檔處理失敗（檔案可能已損毀或不是音訊）/);
     await speechVia("groq", "whisper-large-v3-turbo");
   });
-  test("錄音轉逐字稿：超過 25 MB 時提示壓縮或分段", async () => {
-    const big = await S.api("/api/files", { name: "長錄音.mp3", data: Buffer.alloc(26 * 1024 * 1024, 1).toString("base64") });
+  test("錄音轉逐字稿：長錄音自動分段轉錄，字幕時間軸接續", async () => {
+    const long = await S.uploadBuf("長錄音.wav", tone(150));
+    const before = S.world.openai.media.filter((m) => m.path?.endsWith("/audio/transcriptions")).length;
+    const r = await run("transcribe", { file: long.id, subtitles: true });
+    ok(r);
+    const reqs = S.world.openai.media.filter((m) => m.path?.endsWith("/audio/transcriptions")).slice(before);
+    assert.equal(reqs.length, 3, "150 秒、每段 60 秒 → 3 段");
+    assert.ok(reqs.every((q) => q.size < 0.3 * 1024 * 1024));
+    // 第二段起，提示包含前一段結尾，讓用詞前後一致
+    assert.match(reqs[1].prompt, /報價/);
+    assert.match(r.events.filter((e) => e.type === "log").map((e) => e.message).join("\n"), /分 3 段處理/);
+    const srt = (await S.download(r.files.find((x) => x.name.endsWith(".srt")))).toString("utf8");
+    assert.match(srt, /00:01:00,0\d\d --> 00:01:03,2\d\d/); // MP3 切段點約有數十毫秒誤差
+    assert.match(srt, /00:02:00,0\d\d --> 00:02:03,2\d\d/);
+    assert.equal((srt.match(/大家好/g) || []).length, 3);
+    assert.equal(r.usage.speech, 3);
+  });
+  test("錄音轉逐字稿：損毀的大檔案清楚說明", async () => {
+    const big = await S.api("/api/files", { name: "長錄音.mp3", data: Buffer.alloc(2 * 1024 * 1024, 1).toString("base64") });
     const r = await run("transcribe", { file: big.id });
-    assert.match(r.error.message, /超過 25 MB/);
+    assert.match(r.error.message, /音檔處理失敗/);
   });
   test("錄音轉逐字稿：未設定語音服務時說明 Claude 無法處理音檔", async () => {
     await speechVia("");
@@ -426,6 +467,188 @@ describe("網站與資訊", () => {
     ok(r);
     assert.equal(r.aiCalls, 0);
     assert.equal((await S.api("/api/kb/detail?id=" + kb.id)).docs.length, 3);
+  });
+});
+
+describe("問卷分析與報告格式檢查", () => {
+  before(useClaude);
+  test("問卷結果分析：不勾 AI 時不呼叫 API；產生含圖表的 Word、Excel、HTML，不含個資", async () => {
+    const f = await S.upload("問卷回覆.csv");
+    const r = await run("survey-analysis", { file: f.id, title: "活動滿意度調查", group: "系所", ai: false });
+    ok(r);
+    assert.equal(r.aiCalls, 0);
+    assert.deepEqual(r.files.map((x) => x.name.replace(/^\d+_/, "")), ["活動滿意度調查.docx", "活動滿意度調查-統計表.xlsx", "活動滿意度調查.html"]);
+    const docx = await S.download(r.files[0]);
+    const zip = await JSZip.loadAsync(docx);
+    assert.equal(Object.keys(zip.files).filter((x) => x.startsWith("word/media/")).length, 6);
+    const t = await docText(r.files[0]);
+    assert.match(t, /有效問卷：60 份/);
+    assert.match(t, /分組比較：依「系所」/);
+    assert.ok(!/@example|王同學/.test(t), "報告不應含個資");
+    const html = (await S.download(r.files[2])).toString("utf8");
+    assert.equal((html.match(/<svg/g) || []).length, 6);
+    assert.match(html, /<figcaption[^>]*>圖1 系所<\/figcaption>/);
+    assert.ok(!/@@FIG|chart:/.test(html));
+    assert.ok(!/chart:\d/.test(r.done.output));
+    cleanCheck(assert, r.done.output, "survey");
+  });
+  test("問卷結果分析：勾選 AI 只送統計與開放題、只呼叫一次", async () => {
+    const f = await S.upload("問卷回覆.csv");
+    const r = await run("survey-analysis", { file: f.id, ai: true });
+    ok(r);
+    assert.equal(r.aiCalls, 1);
+    const sent = JSON.stringify(S.world.claude.calls.at(-1).body.messages);
+    assert.match(sent, /整體滿意度/);
+    assert.match(sent, /希望增加晚上的場次/);
+    assert.ok(!/@example|王同學/.test(sent), "不可送出個資");
+    assert.match(await docText(r.files[0]), /分析摘要/);
+  });
+  test("問卷結果分析：分組欄位不存在、檔案不是表格時提示", async () => {
+    const f = await S.upload("問卷回覆.csv");
+    let r = await run("survey-analysis", { file: f.id, group: "不存在的欄位" });
+    assert.match(r.error.message, /找不到分組欄位「不存在的欄位」/);
+    const d = await S.upload("會議紀錄.docx");
+    r = await run("survey-analysis", { file: d.id });
+    assert.match(r.error.message, /CSV 或 Excel/);
+  });
+  test("報告格式檢查：錯誤報告列出問題、自動修正另存新檔，不呼叫 API", async () => {
+    const f = await S.upload("報告-格式錯誤.docx");
+    const r = await run("report-format-check", { file: f.id, profile: "academic", fix: true, ai: false });
+    ok(r);
+    assert.equal(r.aiCalls, 0);
+    const names = r.files.map((x) => x.name.replace(/^\d+_/, ""));
+    assert.ok(names.includes("報告-格式錯誤-格式修正.docx"), names.join());
+    const t = await docText(r.files.find((x) => x.name.includes("格式檢查結果")));
+    assert.match(t, /未通過/);
+    assert.match(t, /自動修正結果/);
+    assert.match(t, /由 \d+ 項減為 \d+ 項/);
+    assert.match(r.events.filter((e) => e.type === "log").map((e) => e.message).join("\n"), /判斷為學術型報告/);
+  });
+  test("報告格式檢查：符合規範的報告全部通過；勾選 AI 審閱只呼叫一次（低思考深度）", async () => {
+    const f = await S.upload("報告-符合規範.docx");
+    const r = await run("report-format-check", { file: f.id, profile: "auto", fix: false, ai: true });
+    ok(r);
+    assert.equal(r.aiCalls, 1);
+    assert.equal(r.files.length, 1);
+    assert.match(r.done.output, /未通過 0 項/);
+    const body = S.world.claude.calls.at(-1).body;
+    assert.equal(body.output_config?.effort, "low");
+    assert.match(JSON.stringify(body.messages), /無網格法/);
+  });
+  test("報告格式檢查：PDF 提示需要 Word 原檔；.doc 自動轉換（需 LibreOffice）", async () => {
+    const p = await S.upload("中文報告.pdf");
+    let r = await run("report-format-check", { file: p.id });
+    assert.match(r.error.message, /需要 Word 檔/);
+    const d = await S.upload("會議紀錄.doc");
+    r = await run("report-format-check", { file: d.id, fix: false });
+    if (r.status === "success") assert.match(r.done.output, /格式檢查/);
+    else assert.match(r.error.message, /另存新檔|LibreOffice/);
+  });
+});
+
+describe("PDF 與圖片工具", () => {
+  before(useClaude);
+  const pdfPages = async (file) => (await PDFDocument.load(await S.download(file))).getPageCount();
+  test("PDF 合併：依清單順序，不呼叫 API；少於 2 個檔提示", async () => {
+    const a = await S.uploadBuf("甲.pdf", await makePdf(2, "A"));
+    const b = await S.uploadBuf("乙.pdf", await makePdf(3, "B", 600));
+    const r = await run("pdf-merge", { files: [b.id, a.id], filename: "合併結果" });
+    ok(r);
+    assert.equal(r.aiCalls, 0);
+    assert.equal(r.files[0].name.replace(/^\d+_/, ""), "合併結果.pdf");
+    assert.equal(await pdfPages(r.files[0]), 5);
+    const widths = (await PDFDocument.load(await S.download(r.files[0]))).getPages().map((p) => Math.round(p.getWidth()));
+    assert.deepEqual(widths, [600, 600, 600, 595, 595], "應依選擇順序合併");
+    const one = await run("pdf-merge", { files: [a.id] });
+    assert.match(one.error.message, /至少需要 2 個檔案/);
+    const none = await run("pdf-merge", { files: [] });
+    assert.match(none.error.message, /請選擇「PDF 檔案/);
+  });
+  test("PDF 分割：多個檔打包成 ZIP；自訂範圍", async () => {
+    const f = await S.uploadBuf("講義.pdf", await makePdf(5));
+    let r = await run("pdf-split", { files: [f.id], mode: "every", every: 2 });
+    ok(r);
+    const zip = await JSZip.loadAsync(await S.download(r.files[0]));
+    assert.deepEqual(Object.keys(zip.files).sort(), ["分割-" + new Date().toLocaleDateString("sv-SE") + "-第1-2頁.pdf", "分割-" + new Date().toLocaleDateString("sv-SE") + "-第3-4頁.pdf", "分割-" + new Date().toLocaleDateString("sv-SE") + "-第5頁.pdf"].sort());
+    r = await run("pdf-split", { files: [f.id], mode: "ranges", ranges: "1-3; 4-" });
+    ok(r);
+    assert.match(r.done.output, /分割成 2 個檔案/);
+  });
+  test("PDF 頁面整理：擷取、刪除、旋轉；頁碼超出範圍時提示", async () => {
+    const f = await S.uploadBuf("頁面.pdf", await makePdf(4));
+    let r = await run("pdf-pages", { files: [f.id], op: "extract", ranges: "4, 1" });
+    ok(r);
+    assert.equal(await pdfPages(r.files[0]), 2);
+    r = await run("pdf-pages", { files: [f.id], op: "delete", ranges: "1-3" });
+    ok(r);
+    assert.equal(await pdfPages(r.files[0]), 1);
+    r = await run("pdf-pages", { files: [f.id], op: "rotate", ranges: "", angle: "180" });
+    ok(r);
+    const doc = await PDFDocument.load(await S.download(r.files[0]));
+    assert.deepEqual(doc.getPages().map((p) => p.getRotation().angle), [180, 180, 180, 180]);
+    r = await run("pdf-pages", { files: [f.id], op: "extract", ranges: "9" });
+    assert.match(r.error.message, /超出範圍（此檔共 4 頁）/);
+    r = await run("pdf-pages", { files: [f.id], op: "delete", ranges: "" });
+    assert.match(r.error.message, /請輸入要刪除的頁碼/);
+  });
+  test("PDF 加浮水印與頁碼：中文、多檔分別處理", async () => {
+    const a = await S.uploadBuf("一.pdf", await makePdf(2));
+    const b = await S.upload("中文報告.pdf");
+    let r = await run("pdf-watermark", { files: [a.id, b.id], text: "僅供審查使用", tile: true, color: "red", opacity: "0.35", size: 40 });
+    ok(r);
+    const zip = await JSZip.loadAsync(await S.download(r.files[0]));
+    assert.deepEqual(Object.keys(zip.files).sort(), ["一-浮水印.pdf", "中文報告-浮水印.pdf"].sort());
+    r = await run("pdf-pagenum", { files: [a.id], format: "第 {n} 頁，共 {total} 頁", position: "bottom-right", skipFirst: true });
+    ok(r);
+    assert.equal(await pdfPages(r.files[0]), 2);
+    r = await run("pdf-watermark", { files: [a.id], text: "" });
+    assert.match(r.error.message, /請填寫「浮水印文字」/);
+  });
+  test("PDF 壓縮：含照片的 PDF 變小；非 PDF 檔提示", async () => {
+    const photo = await sharp({ create: { width: 2400, height: 1800, channels: 3, background: "#88aacc" } }).jpeg({ quality: 98 }).toBuffer();
+    const img = await S.uploadBuf("照片.jpg", photo);
+    let r = await run("images-to-pdf", { files: [img.id, img.id], pageSize: "a4", filename: "相簿" });
+    ok(r);
+    assert.equal(await pdfPages(r.files[0]), 2);
+    const big = await S.uploadBuf("相簿.pdf", await S.download(r.files[0]));
+    r = await run("pdf-compress", { files: [big.id], level: "high" });
+    ok(r);
+    assert.ok(r.files[0].size < big.size, `${big.size} → ${r.files[0].size}`);
+    assert.match(r.done.output, /減少 \d+%/);
+    r = await run("pdf-compress", { files: [img.id] });
+    assert.match(r.error.message, /不是 PDF 檔（圖片請使用「圖片轉 PDF」功能）/);
+    r = await run("images-to-pdf", { files: [big.id] });
+    assert.match(r.error.message, /不是圖片/);
+  });
+  test("圖片批次處理：縮放轉 WebP、移除 EXIF，多張打包 ZIP；單張直接輸出", async () => {
+    const photo = await sharp({ create: { width: 3000, height: 2000, channels: 3, background: "#4a7" } }).jpeg().withMetadata({ orientation: 1 }).toBuffer();
+    const a = await S.uploadBuf("IMG_0001.jpg", photo);
+    const b = await S.uploadBuf("截圖2.png", await sharp({ create: { width: 800, height: 600, channels: 4, background: "#fff8" } }).png().toBuffer());
+    let r = await run("image-batch", { files: [a.id, b.id], width: 1280, format: "webp", quality: 70 });
+    ok(r);
+    assert.equal(r.aiCalls, 0);
+    const zip = await JSZip.loadAsync(await S.download(r.files[0]));
+    assert.deepEqual(Object.keys(zip.files).sort(), ["IMG_0001.webp", "截圖2.webp"]);
+    const m = await sharp(await zip.file("IMG_0001.webp").async("nodebuffer")).metadata();
+    assert.deepEqual([m.width, m.height, m.exif], [1280, 853, undefined]);
+    r = await run("image-batch", { files: [a.id], maxKB: 40, format: "jpg" });
+    ok(r);
+    assert.ok(r.files[0].name.endsWith("IMG_0001.jpg"));
+    assert.ok(r.files[0].size <= 40 * 1024);
+    const heic = await S.api("/api/files", { name: "手機.heic", data: Buffer.from("fake").toString("base64") });
+    assert.equal(heic.kind, "image");
+    r = await run("image-batch", { files: [heic.id] });
+    assert.match(r.error.message, /HEIC/);
+    const doc = await S.upload("會議紀錄.docx");
+    r = await run("image-batch", { files: [doc.id] });
+    assert.match(r.error.message, /不是圖片/);
+  });
+  test("其他圖片格式（TIFF）可直接用於圖片分析，送給 AI 前轉成 PNG", async () => {
+    const tif = await S.uploadBuf("掃描.tif", await sharp({ create: { width: 300, height: 200, channels: 3, background: "#fff" } }).tiff().toBuffer());
+    const r = await run("image-analysis", { file: tif.id });
+    ok(r);
+    const img = S.world.claude.calls.at(-1).body.messages[0].content.find((c) => c.type === "image");
+    assert.equal(img.source.media_type, "image/png");
   });
 });
 

@@ -309,6 +309,16 @@ function fieldHtml(f) {
       </div>`;
       break;
     }
+    case "files": {
+      const exts = (f.accept || "").split(",").filter(Boolean);
+      const lib = FILES.filter((x) => !exts.length || exts.includes(x.ext));
+      input = `<div data-filesfield="${f.key}" class="files-field">
+        <div><input type="file" id="${id}" multiple accept="${esc(f.accept || "")}" /></div>
+        <div class="files-lib">或從檔案庫加入：<select id="${id}-lib"><option value="">請選擇</option>${lib.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join("")}</select></div>
+        <table class="data-table files-list hidden"><thead><tr><th style="width:48px">順序</th><th>檔案</th><th style="width:170px">操作</th></tr></thead><tbody></tbody></table>
+      </div>`;
+      break;
+    }
     case "doc":
       input = `<div data-docfield="${f.key}">
         <label class="inline"><input type="radio" name="${f.key}-mode" value="upload" checked />上傳檔案</label>
@@ -327,13 +337,68 @@ function fieldHtml(f) {
   return `<tr><th><label for="${id}">${req}${esc(f.label)}</label></th><td>${input}${f.help ? `<div class="help">${esc(f.help)}</div>` : ""}</td></tr>`;
 }
 
+// 多檔欄位：選擇的檔案與檔案庫項目依順序排列，可調整順序或移除
+const filesState = new WeakMap();
+const sizeText = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+function renderFilesList(box) {
+  const items = filesState.get(box) || [];
+  const t = $(".files-list", box);
+  t.classList.toggle("hidden", !items.length);
+  $("tbody", t).innerHTML = items
+    .map((it, i) => `<tr data-i="${i}"><td class="num">${i + 1}</td><td>${esc(it.name)} <span class="muted">${it.file ? `（${sizeText(it.file.size)}，送出時上傳）` : "（檔案庫）"}</span></td><td class="nowrap"><button type="button" class="btn btn-sm" data-fop="up" ${i ? "" : "disabled"}>上移</button> <button type="button" class="btn btn-sm" data-fop="down" ${i < items.length - 1 ? "" : "disabled"}>下移</button> <button type="button" class="btn btn-sm btn-danger" data-fop="rm">移除</button></td></tr>`)
+    .join("");
+}
+document.addEventListener("change", (e) => {
+  const box = e.target.closest("[data-filesfield]");
+  if (!box) return;
+  const items = filesState.get(box) || [];
+  if (e.target.type === "file") {
+    for (const file of e.target.files) items.push({ name: file.name, file });
+    e.target.value = "";
+  } else if (e.target.tagName === "SELECT" && e.target.value) {
+    items.push({ name: e.target.selectedOptions[0].textContent, id: e.target.value });
+    e.target.value = "";
+  }
+  filesState.set(box, items);
+  renderFilesList(box);
+});
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-fop]");
+  const box = b?.closest("[data-filesfield]");
+  if (!box) return;
+  const items = filesState.get(box) || [];
+  const i = Number(b.closest("tr").dataset.i);
+  if (b.dataset.fop === "rm") items.splice(i, 1);
+  else {
+    const j = b.dataset.fop === "up" ? i - 1 : i + 1;
+    [items[i], items[j]] = [items[j], items[i]];
+  }
+  renderFilesList(box);
+});
+document.addEventListener("reset", (e) => $$("[data-filesfield]", e.target).forEach((box) => (filesState.set(box, []), renderFilesList(box))));
+
 /** 依畫面收集表單值；上傳的檔案先送進檔案庫 */
 async function collectForm(svc, status) {
   const form = {};
   for (const f of svc.fields) {
     const id = `f-${f.key}`;
     if (f.type === "checkbox") form[f.key] = $(`#${id}`).checked;
-    else if (f.type === "doc" || f.type === "file") {
+    else if (f.type === "files") {
+      const box = $(`[data-filesfield="${f.key}"]`);
+      const items = filesState.get(box) || [];
+      const ids = [];
+      for (const [i, it] of items.entries()) {
+        if (!it.id) {
+          status(`上傳「${it.name}」中…（${i + 1}/${items.length}）`);
+          const saved = await uploadFile(it.file);
+          it.id = saved.id;
+          delete it.file;
+        }
+        ids.push(it.id);
+      }
+      renderFilesList(box);
+      form[f.key] = ids;
+    } else if (f.type === "doc" || f.type === "file") {
       const mode = $(`input[name="${f.key}-mode"]:checked`).value;
       if (mode === "upload") {
         const file = $(`#${id}`).files[0];
@@ -718,6 +783,8 @@ function nodeFieldInput(node, key, def) {
       return `<select ${a}>${Object.entries(def.options).map(([k, l]) => `<option value="${esc(k)}" ${k === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
     case "kb":
       return `<select ${a}><option value="">請選擇知識庫</option>${KBS.map((k) => `<option value="${k.id}" ${k.id === v ? "selected" : ""}>${esc(k.name)}</option>`).join("")}</select>`;
+    case "files":
+      return `<select ${a} multiple size="5">${FILES.map((f) => `<option value="${f.id}" ${String(v).split(",").includes(f.id) ? "selected" : ""}>${esc(f.name)}</option>`).join("")}</select><div class="help muted">按住 Ctrl（Mac 為 ⌘）可多選，依檔案庫順序處理；也可在服務中使用變數。</div>`;
     case "file":
       return `<select ${a}><option value="">請選擇檔案（可至「檔案管理」上傳）</option>${FILES.map((f) => `<option value="${f.id}" ${f.id === v ? "selected" : ""}>${esc(f.name)}</option>`).join("")}</select>`;
     default:
@@ -795,7 +862,7 @@ document.addEventListener("input", (e) => {
   const row = t.closest(".node-detail");
   if (row && t.dataset.k) {
     const n = editing.nodes[Number(row.dataset.i)];
-    n[t.dataset.k] = t.type === "checkbox" ? t.checked : t.value;
+    n[t.dataset.k] = t.type === "checkbox" ? t.checked : t.multiple ? [...t.selectedOptions].map((o) => o.value).join(",") : t.value;
   }
 });
 document.addEventListener("change", (e) => {
@@ -962,7 +1029,7 @@ PAGES.files = async () => {
   const kind = (f) => (f.needsTranscribe ? `<span class="st st-stop">音檔（需轉錄）</span>` : f.needsOcr ? `<span class="st st-stop">需文字辨識</span>` : "可直接使用");
   main().innerHTML = `<h2 class="page-title">檔案管理</h2><p class="page-desc">上傳的檔案可在各項服務中直接選用；產出檔案為各服務辦理結果。</p>
     <div class="panel"><div class="panel-head">上傳檔案</div><div class="panel-body"><input type="file" id="lib-upload" multiple />
-      <div class="help muted">支援文件：PDF、Word（.docx／.doc）、Excel（.xlsx／.xls）、PowerPoint（.pptx／.ppt）、OpenDocument（.odt／.ods／.odp）、RTF、EPUB、Email（.eml）、CSV、TXT、Markdown、HTML、字幕檔；圖片：PNG、JPG、WEBP、GIF；音檔：MP3、M4A、WAV、WEBM、OGG、FLAC。單檔上限 50 MB（音檔轉錄上限 25 MB）。舊版 .doc／.xls／.ppt 需安裝 LibreOffice 才能讀取部分檔案。</div><div id="lib-status" class="muted"></div></div></div>
+      <div class="help muted">支援文件：PDF、Word（.docx／.doc）、Excel（.xlsx／.xls）、PowerPoint（.pptx／.ppt）、OpenDocument（.odt／.ods／.odp）、RTF、EPUB、Email（.eml）、CSV、TXT、Markdown、HTML、字幕檔；圖片：PNG、JPG、WEBP、GIF、TIFF、BMP、AVIF、SVG；音檔：MP3、M4A、WAV、WEBM、OGG、FLAC（長錄音自動分段轉錄）。單檔上限 50 MB。舊版 .doc／.xls／.ppt 需安裝 LibreOffice 才能讀取部分檔案。</div><div id="lib-status" class="muted"></div></div></div>
     <div class="panel"><div class="panel-head">檔案庫（${files.length}）</div>
     ${
       files.length

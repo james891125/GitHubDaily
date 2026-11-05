@@ -4,6 +4,7 @@ import { getSettings } from "./store.js";
 import { PROVIDERS, providerBase, providerKey, providerHeaders, providerReady } from "./providers.js";
 import { recordUsage, LLMError } from "./llm.js";
 import { convertChinese } from "./tools.js";
+import { prepareAudio } from "./audio.js";
 
 const fail = (msg, status = 400) => new LLMError(msg, status);
 
@@ -97,51 +98,71 @@ const LANG = { "zh-TW": "zh", zh: "zh", en: "en", ja: "ja", ko: "ko", auto: "" }
  * @param {{ name: string, language?: "zh-TW"|"en"|"ja"|"ko"|"auto", prompt?: string, signal?: AbortSignal }} opts
  * @returns {Promise<{ text: string, segments?: Array<{start,end,text}>, provider: string, model: string }>}
  */
-export async function transcribe(buf, { name, language = "zh-TW", prompt = "", signal } = {}) {
+export async function transcribe(buf, { name, language = "zh-TW", prompt = "", signal, log = () => {} } = {}) {
   const s = getSettings();
   const { id, p, model, mode } = speechConfig(s);
   const ext = (name.match(/\.[^.]+$/)?.[0] || "").toLowerCase();
-  const limit = 25 * 1024 * 1024;
-  if (buf.length > limit) throw fail(`音檔 ${(buf.length / 1048576).toFixed(1)} MB，超過 25 MB 上限。請轉成較低位元率的 MP3（例如 64 kbps，約可容納 50 分鐘），或分段上傳。`, 413);
-  const lang = LANG[language] ?? "";
-  let text = "";
-  let segments;
-  if (mode === "transcriptions") {
-    const form = new FormData();
-    form.append("file", new Blob([buf], { type: AUDIO_TYPES[ext] || "application/octet-stream" }), name.replace(/[^\x20-\x7e]/g, "_") || "audio" + ext);
-    form.append("model", model);
-    const verbose = /whisper/i.test(model);
-    form.append("response_format", verbose ? "verbose_json" : "json");
-    if (lang) form.append("language", lang);
-    // 提示可引導用字（例如繁體中文、專有名詞）
-    const hint = [language === "zh-TW" ? "以下是繁體中文的逐字稿，請使用臺灣用語與全形標點。" : "", prompt].filter(Boolean).join(" ");
-    if (hint) form.append("prompt", hint.slice(0, 800));
-    const res = await compatFetch(id, s, "/audio/transcriptions", { method: "POST", body: form }, signal);
-    const data = await res.json();
-    text = data.text || "";
-    if (Array.isArray(data.segments)) segments = data.segments.map((g) => ({ start: g.start, end: g.end, text: String(g.text || "").trim() }));
-  } else {
-    const fmt = { ".mp3": "mp3", ".mpga": "mp3", ".mpeg": "mp3", ".wav": "wav" }[ext];
-    if (!fmt) throw fail(`${p.name} 只接受 MP3 或 WAV 音檔，請先轉檔（或改用 OpenAI／Groq 的語音轉文字）`, 422);
-    const instruction = `請將這段錄音逐字轉成文字${language === "zh-TW" ? "（使用繁體中文與臺灣用語）" : ""}，不要摘要、不要加入說明，只輸出逐字稿。${prompt}`;
-    const res = await compatFetch(
-      id,
-      s,
-      "/chat/completions",
-      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model, messages: [{ role: "user", content: [{ type: "text", text: instruction }, { type: "input_audio", input_audio: { data: buf.toString("base64"), format: fmt } }] }] }) },
-      signal,
-    );
-    const data = await res.json();
-    text = data.choices?.[0]?.message?.content || "";
+  // 單次上傳上限（OpenAI、Groq 為 25 MB；Gemini 等內嵌音訊約 20 MB）；測試可用環境變數調小
+  const limit = Number(process.env.STUDIO_AUDIO_LIMIT_MB || (mode === "chat" ? 18 : 24)) * 1024 * 1024;
+  const chatFormats = { ".mp3": "mp3", ".mpga": "mp3", ".mpeg": "mp3", ".wav": "wav" };
+  const needConvert = mode === "chat" && !chatFormats[ext];
+  const prepared = await prepareAudio(buf, ext, { limitBytes: limit, segmentSec: Number(process.env.STUDIO_AUDIO_SEGMENT_SEC) || 0, force: needConvert, signal, log });
+  if (!prepared) {
+    if (needConvert) throw fail(`${p.name} 只接受 MP3 或 WAV 音檔。請執行 npm install 安裝內建的 ffmpeg（自動轉檔），或先自行轉成 MP3。`, 422);
+    throw fail(`音檔 ${(buf.length / 1048576).toFixed(1)} MB，超過上限。請執行 npm install 安裝內建的 ffmpeg（會自動壓縮與分段），或先轉成較低位元率的 MP3。`, 413);
   }
+  const { chunks } = prepared;
+  const lang = LANG[language] ?? "";
+  const hint = [language === "zh-TW" ? "以下是繁體中文的逐字稿，請使用臺灣用語與全形標點。" : "", prompt].filter(Boolean).join(" ");
+  const texts = [];
+  let segments = [];
+  let hasSegments = true;
+  for (const [i, c] of chunks.entries()) {
+    if (signal?.aborted) throw fail("已取消", 499);
+    if (chunks.length > 1) log(`轉錄第 ${i + 1}/${chunks.length} 段…`);
+    const cext = prepared.converted ? ".mp3" : ext;
+    if (mode === "transcriptions") {
+      const form = new FormData();
+      form.append("file", new Blob([c.buf], { type: AUDIO_TYPES[cext] || "application/octet-stream" }), (name.replace(/[^\x20-\x7e]/g, "_").replace(/\.[^.]+$/, "") || "audio") + cext);
+      form.append("model", model);
+      const verbose = /whisper/i.test(model);
+      form.append("response_format", verbose ? "verbose_json" : "json");
+      if (lang) form.append("language", lang);
+      // 提示可引導用字；分段時附上前一段結尾，讓斷句與用詞連貫
+      // （繁體中文時先轉成臺灣用語，避免簡體的上文讓下一段也輸出簡體）
+      const tail = texts.at(-1)?.slice(-200) || "";
+      const prev = language === "zh-TW" && tail ? convertChinese(tail, "s2twp") : tail;
+      if (hint || prev) form.append("prompt", [hint, prev].filter(Boolean).join(" ").slice(0, 800));
+      const res = await compatFetch(id, s, "/audio/transcriptions", { method: "POST", body: form }, signal);
+      const data = await res.json();
+      texts.push(data.text || "");
+      if (Array.isArray(data.segments)) segments.push(...data.segments.map((g) => ({ start: g.start + c.offset, end: g.end + c.offset, text: String(g.text || "").trim() })));
+      else hasSegments = false;
+    } else {
+      const fmt = chatFormats[cext];
+      const instruction = `請將這段錄音逐字轉成文字${language === "zh-TW" ? "（使用繁體中文與臺灣用語）" : ""}，不要摘要、不要加入說明，只輸出逐字稿。${prompt}`;
+      const res = await compatFetch(
+        id,
+        s,
+        "/chat/completions",
+        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model, messages: [{ role: "user", content: [{ type: "text", text: instruction }, { type: "input_audio", input_audio: { data: c.buf.toString("base64"), format: fmt } }] }] }) },
+        signal,
+      );
+      const data = await res.json();
+      texts.push(data.choices?.[0]?.message?.content || "");
+      hasSegments = false;
+    }
+    recordUsage({ kind: "speech" });
+  }
+  let text = texts.map((t) => t.trim()).filter(Boolean).join(chunks.length > 1 ? "\n" : "");
+  if (!hasSegments) segments = undefined;
   // Whisper 常輸出簡體字：選擇繁體中文時在本機轉成臺灣用語
   if (language === "zh-TW") {
     text = convertChinese(text, "s2twp");
     segments = segments?.map((g) => ({ ...g, text: convertChinese(g.text, "s2twp") }));
   }
-  recordUsage({ kind: "speech" });
   if (!text.trim()) throw fail("沒有辨識到任何語音內容（可能是靜音或音質太差）", 422);
-  return { text: text.trim(), segments, provider: p.name, model };
+  return { text: text.trim(), segments, provider: p.name, model, parts: chunks.length, duration: prepared.duration };
 }
 
 const ts = (sec, sep = ",") => {

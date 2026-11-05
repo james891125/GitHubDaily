@@ -1,5 +1,5 @@
 // Markdown → Word (.docx)：支援標題、段落、粗體、條列、編號、表格、引言
-import { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell, WidthType, BorderStyle, AlignmentType } from "docx";
+import { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell, WidthType, BorderStyle, AlignmentType, ImageRun } from "docx";
 
 const HEADINGS = [HeadingLevel.HEADING_1, HeadingLevel.HEADING_2, HeadingLevel.HEADING_3, HeadingLevel.HEADING_4];
 
@@ -20,7 +20,7 @@ function runs(text, font, size) {
  * @param {string} md
  * @param {{ formal?: boolean, title?: string }} opts formal：公文等正式文件使用標楷體
  */
-export async function markdownToDocx(md, { formal = false } = {}) {
+export async function markdownToDocx(md, { formal = false, images = {} } = {}) {
   const fontName = formal ? "標楷體" : "微軟正黑體";
   const font = { ascii: formal ? "Times New Roman" : "Calibri", hAnsi: formal ? "Times New Roman" : "Calibri", eastAsia: fontName };
   const size = formal ? 28 : 24; // 14pt / 12pt（單位為半點）
@@ -31,6 +31,17 @@ export async function markdownToDocx(md, { formal = false } = {}) {
   while (i < lines.length) {
     const line = lines[i];
     if (!line.trim()) {
+      i++;
+      continue;
+    }
+    // 圖片：![圖說](chart:ID)，圖說放在圖的下方
+    const img = /^!\[([^\]]*)\]\(([^)]+)\)\s*$/.exec(line);
+    if (img && images[img[2]]) {
+      const im = images[img[2]];
+      const maxW = 600;
+      const w = Math.min(maxW, im.width);
+      children.push(new Paragraph({ alignment: AlignmentType.CENTER, children: [new ImageRun({ type: "png", data: im.data, transformation: { width: w, height: Math.round((im.height * w) / im.width) } })] }));
+      if (img[1]) children.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 200 }, children: [new TextRun({ text: img[1], font, size: formal ? 28 : size })] }));
       i++;
       continue;
     }

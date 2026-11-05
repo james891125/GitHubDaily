@@ -10,7 +10,17 @@ import { parseDocument } from "./docs.js";
 import * as kb from "./kb.js";
 import { markdownToDocx } from "./docx.js";
 import { transcribe, toSrt, toVtt, toTimestamped, generateImages, AUDIO_TYPES } from "./media.js";
+import { analyzeSurvey, surveyMarkdown, statsForAI, openAnswersForAI, surveyXlsx, surveyHtml, chartFor, svgToPng } from "./survey.js";
+import { checkDocx, fixDocx, resultsToMarkdown } from "./formatcheck.js";
+import * as pdf from "./pdftools.js";
+import { batchImages, IMAGE_FORMATS, IMAGE_INPUT } from "./imagetools.js";
+import { convertWithOffice } from "./formats.js";
+import { miniMarkdown } from "../public/mini-md.js";
+import JSZip from "jszip";
+import sharp from "sharp";
 import { searchPapers, papersToTable, readFeed, formatCitations, CITE_STYLES, convertChinese, ZH_MODES, compareTexts, parseTable, tableStats } from "./tools.js";
+
+export const PDF_OPS = { merge: "合併多個 PDF", split: "分割成多個檔", extract: "擷取／重新排序頁面", delete: "刪除頁面", rotate: "旋轉頁面", watermark: "加文字浮水印", pagenum: "加頁碼", compress: "壓縮檔案大小", images: "圖片轉 PDF" };
 
 // ---------- 節點定義（前端依此產生表單） ----------
 export const NODE_TYPES = {
@@ -211,6 +221,62 @@ export const NODE_TYPES = {
     },
     out: "images",
   },
+  survey: {
+    label: "問卷分析",
+    desc: "讀取 Google 表單等匯出的 CSV／Excel，自動判斷題型並產生統計表、圖表（Word／Excel／HTML）；個資欄位不分析",
+    fields: {
+      fileId: { label: "問卷資料檔（CSV／Excel）", type: "file", default: "" },
+      group: { label: "分組比較欄位（選填，填題目名稱）", type: "text", default: "" },
+      title: { label: "報告標題", type: "text", default: "問卷分析報告" },
+      ai: { label: "使用 AI 撰寫分析摘要與開放題歸納", type: "checkbox", default: false },
+    },
+    out: "survey",
+  },
+  format_check: {
+    label: "報告格式檢查",
+    desc: "依國科會／政府計畫成果報告常見格式逐項檢查 Word 檔（字型、字級、對齊、標號、架構、圖表、用語、參考文獻），可自動修正",
+    fields: {
+      fileId: { label: "報告檔（.docx／.doc／.odt）", type: "file", default: "" },
+      profile: { label: "報告類型", type: "select", options: { auto: "自動判斷", academic: "學術型（國科會計畫、研究報告）", project: "計畫成果型（縣市計畫、委託案）" }, default: "auto" },
+      fix: { label: "自動修正可修正的項目（另存新檔）", type: "checkbox", default: false },
+    },
+    out: "check",
+  },
+  pdf_tool: {
+    label: "PDF 工具",
+    desc: "合併、分割、擷取／刪除頁面、旋轉、加浮水印、加頁碼、壓縮、圖片轉 PDF（不使用 AI）",
+    fields: {
+      op: { label: "功能", type: "select", options: PDF_OPS, default: "merge" },
+      fileIds: { label: "檔案（可多選，依順序處理）", type: "files", default: "" },
+      ranges: { label: "頁碼範圍（例：1-3, 5, 8-）", type: "text", default: "" },
+      splitMode: { label: "分割方式", type: "select", options: { each: "每頁一個檔", every: "每 N 頁一個檔", ranges: "依自訂範圍（用分號分隔各檔）" }, default: "each" },
+      every: { label: "每幾頁一個檔", type: "number", default: 2 },
+      text: { label: "浮水印文字／頁碼格式", type: "text", default: "" },
+      tile: { label: "浮水印鋪滿整頁", type: "checkbox", default: false },
+      position: { label: "頁碼位置", type: "select", options: { "bottom-center": "下方置中", "bottom-right": "右下角", "top-right": "右上角" }, default: "bottom-center" },
+      skipFirst: { label: "封面不加頁碼", type: "checkbox", default: false },
+      angle: { label: "旋轉角度", type: "select", options: { 90: "順時針 90°", 180: "180°", 270: "逆時針 90°" }, default: "90" },
+      level: { label: "壓縮程度", type: "select", options: { low: "輕度（品質優先）", medium: "中度（建議）", high: "高度（檔案最小）" }, default: "medium" },
+      filename: { label: "檔名", type: "text", default: "PDF-{{today}}" },
+    },
+    out: "pdf",
+  },
+  image_batch: {
+    label: "圖片批次處理",
+    desc: "縮放、轉格式、壓縮、移除拍攝資訊（含 GPS 位置），多張自動打包成 ZIP（不使用 AI）",
+    fields: {
+      fileIds: { label: "圖片（可多選）", type: "files", default: "" },
+      width: { label: "最大寬度（像素，選填）", type: "number", default: "" },
+      height: { label: "最大高度（像素，選填）", type: "number", default: "" },
+      percent: { label: "依比例縮放（%，選填）", type: "number", default: "" },
+      format: { label: "輸出格式", type: "select", options: IMAGE_FORMATS, default: "keep" },
+      quality: { label: "品質（10–100）", type: "number", default: 80 },
+      maxKB: { label: "每張檔案大小上限（KB，選填）", type: "number", default: "" },
+      keepMeta: { label: "保留拍攝資訊（EXIF）", type: "checkbox", default: false },
+      filename: { label: "壓縮檔名", type: "text", default: "圖片-{{today}}" },
+    },
+    out: "images",
+  },
   webhook: {
     label: "發送通知",
     desc: "POST 到 Slack / Discord / Teams 等 Webhook",
@@ -244,6 +310,7 @@ export function stringify(v) {
   if (v.__type === "diff") return v.markdown;
   if (v.__type === "transcript") return v.segments ? v.timed : v.text;
   if (v.__type === "images") return `已產生 ${v.files.length} 張圖片（請見「產出檔案」）。\n\n描述：${v.prompt}`;
+  if (v.__type === "files") return v.markdown;
   if (v.__type === "stats") return `${v.markdown}\n\n## 前 5 筆資料\n\n${v.sample}`;
   return JSON.stringify(v, null, 2);
 }
@@ -293,9 +360,9 @@ export async function addFile(name, buf) {
   let pages;
   let needsOcr = false;
   let needsTranscribe = false;
-  if (IMAGE_TYPES[ext] || AUDIO_TYPES[ext]) {
+  if (IMAGE_TYPES[ext] || IMAGE_INPUT.includes(ext) || AUDIO_TYPES[ext]) {
     if (!buf?.length) throw Object.assign(new Error("檔案是空的，沒有可處理的內容"), { status: 422 });
-    kind = IMAGE_TYPES[ext] ? "image" : "audio";
+    kind = AUDIO_TYPES[ext] ? "audio" : "image";
     needsOcr = kind === "image";
     needsTranscribe = kind === "audio";
   } else {
@@ -341,6 +408,21 @@ export function deleteFile(id) {
   if (meta) fs.rmSync(rawPath(meta), { force: true });
 }
 
+/** AI 只接受 PNG／JPG／WEBP／GIF：其他圖片格式先轉成 PNG；過大的圖片縮小以節省用量 */
+async function toModelImage(meta, buf) {
+  if (!IMAGE_TYPES[meta.ext] && !IMAGE_INPUT.includes(meta.ext)) return { buf, type: null };
+  let m;
+  try {
+    m = await sharp(buf).metadata();
+  } catch {
+    if (IMAGE_TYPES[meta.ext]) return { buf, type: IMAGE_TYPES[meta.ext] };
+    throw Object.assign(new Error(`「${meta.name}」無法讀取為圖片${/hei[cf]/.test(meta.ext) ? "（HEIC 請先轉成 JPG）" : ""}`), { status: 422 });
+  }
+  if (IMAGE_TYPES[meta.ext] && buf.length <= 4.5 * 1024 * 1024 && Math.max(m.width, m.height) <= 3000) return { buf, type: IMAGE_TYPES[meta.ext] };
+  const out = await sharp(buf).rotate().resize({ width: 2000, height: 2000, fit: "inside", withoutEnlargement: true }).png().toBuffer();
+  return { buf: out, type: "image/png" };
+}
+
 // ---------- 服務表單 ----------
 /**
  * 文件來源 → { __type: "doc", name, text }
@@ -366,6 +448,7 @@ export async function prepareServiceForm(service, form = {}, { signal } = {}) {
   for (const f of service.fields) {
     const v = form[f.key];
     if (f.type === "doc") out[f.key] = v ? await resolveDocSource(v, { signal }) : undefined;
+    else if (f.type === "files") out[f.key] = (Array.isArray(v) ? v : String(v ?? "").split(",")).map((x) => String(x).trim()).filter(Boolean).join(",");
     else if (f.type === "checkbox") out[f.key] = v === true || v === "true" || v === "on" ? "true" : "";
     else out[f.key] = v == null ? (f.default ?? "") : String(v).trim();
   }
@@ -444,9 +527,9 @@ async function runNode(rawNode, vars, ctx) {
       }
     }
     case "ocr": {
-      const { meta, buf } = getFileRaw(render(node.fileId, vars));
+      const { meta, buf: raw } = getFileRaw(render(node.fileId, vars));
       const isPdf = meta.ext === ".pdf";
-      const mediaType = isPdf ? "application/pdf" : IMAGE_TYPES[meta.ext];
+      const { buf, type: mediaType } = isPdf ? { buf: raw, type: "application/pdf" } : await toModelImage(meta, raw);
       if (!mediaType) throw Object.assign(new Error("文字辨識支援 PDF 與圖片（PNG、JPG、WEBP、GIF）"), { status: 422 });
       if (buf.length > 25 * 1024 * 1024) throw Object.assign(new Error("檔案超過 25 MB，請先分割後再辨識"), { status: 422 });
       log(`辨識「${meta.name}」中…（${isPdf ? "PDF" : "圖片"}，${Math.round(buf.length / 1024)} KB）`);
@@ -519,15 +602,16 @@ async function runNode(rawNode, vars, ctx) {
     case "transcribe": {
       const { meta, buf } = getFileRaw(render(node.fileId, vars));
       if (!AUDIO_TYPES[meta.ext]) throw Object.assign(new Error(`「${meta.name}」不是音檔。支援：${Object.keys(AUDIO_TYPES).join("、")}`), { status: 422 });
-      log(`轉錄「${meta.name}」中…（${(buf.length / 1048576).toFixed(1)} MB，長錄音需要較久）`);
-      const r = await transcribe(buf, { name: meta.name, language: node.language, prompt: render(node.prompt || "", vars), signal });
-      log(`完成（${r.provider}／${r.model}），${r.text.length} 字${r.segments ? `、${r.segments.length} 段` : ""}`);
+      log(`轉錄「${meta.name}」中…（${(buf.length / 1048576).toFixed(1)} MB）`);
+      const r = await transcribe(buf, { name: meta.name, language: node.language, prompt: render(node.prompt || "", vars), signal, log });
+      log(`完成（${r.provider}／${r.model}${r.parts > 1 ? `，分 ${r.parts} 段處理` : ""}），${r.text.length} 字${r.segments ? `、${r.segments.length} 句` : ""}`);
       return { __type: "transcript", name: meta.name, text: r.text, timed: r.segments ? toTimestamped(r.segments) : r.text, segments: r.segments || null };
     }
     case "image_ask": {
-      const { meta, buf } = getFileRaw(render(node.fileId, vars));
-      if (!IMAGE_TYPES[meta.ext]) throw Object.assign(new Error("圖片分析支援 PNG、JPG、WEBP、GIF"), { status: 422 });
-      const { text } = await generate({ prompt: render(node.question, vars), system: "請使用繁體中文回答，以 Markdown 格式輸出。", attachments: [{ kind: "image", mediaType: IMAGE_TYPES[meta.ext], data: buf.toString("base64"), name: meta.name }] }, onText, signal);
+      const { meta, buf: raw } = getFileRaw(render(node.fileId, vars));
+      const { buf, type } = await toModelImage(meta, raw);
+      if (!type) throw Object.assign(new Error("圖片分析支援 PNG、JPG、WEBP、GIF、TIFF、BMP、AVIF、SVG"), { status: 422 });
+      const { text } = await generate({ prompt: render(node.question, vars), system: "請使用繁體中文回答，以 Markdown 格式輸出。", attachments: [{ kind: "image", mediaType: type, data: buf.toString("base64"), name: meta.name }] }, onText, signal);
       return text;
     }
     case "image_gen": {
@@ -543,6 +627,196 @@ async function runNode(rawNode, vars, ctx) {
       });
       log(`完成 ${files.length} 張`);
       return { __type: "images", files, prompt };
+    }
+    case "survey": {
+      const { meta, buf } = getFileRaw(render(node.fileId, vars));
+      if (![".csv", ".tsv", ".txt", ".xlsx", ".xls", ".ods"].includes(meta.ext)) throw Object.assign(new Error("問卷分析需要 CSV 或 Excel 檔（Google 表單：回覆 → 下載回覆（.csv）；或在試算表選「檔案 → 下載 → CSV／Excel」）"), { status: 422 });
+      const legacy = meta.ext === ".xls" || meta.ext === ".ods";
+      const xbuf = legacy ? await convertWithOffice(buf, meta.ext, "xlsx") : buf;
+      if (!xbuf) throw Object.assign(new Error(`無法讀取「${meta.name}」，請另存為 .xlsx 或 .csv 後再上傳`), { status: 422 });
+      const table = await parseTable(legacy ? meta.name.replace(/\.\w+$/, ".xlsx") : meta.name, xbuf);
+      if (!table.rows.length) throw Object.assign(new Error("檔案中沒有回覆資料"), { status: 422 });
+      const group = render(node.group || "", vars).trim();
+      if (group && !table.columns.includes(group)) throw Object.assign(new Error(`找不到分組欄位「${group}」。可用的欄位：${table.columns.slice(0, 15).join("、")}`), { status: 400 });
+      const a = analyzeSurvey(table, { group: group || undefined });
+      const counts = {};
+      for (const q of a.questions) counts[q.type] = (counts[q.type] || 0) + 1;
+      log(`${a.total} 份回覆；單選 ${counts.single || 0}、複選 ${counts.multi || 0}、量表 ${counts.scale || 0}、數值 ${counts.number || 0}、開放題 ${counts.text || 0} 題${a.personal.length ? `；個資欄位 ${a.personal.length} 個不分析` : ""}`);
+      let narrative = "";
+      let openSummary = "";
+      if (node.ai) {
+        const open = openAnswersForAI(a);
+        const prompt = `以下是一份問卷的統計結果（已排除個人資料）。請用臺灣繁體中文、正式書面語撰寫：\n【分析摘要】3–5 段，說明整體結果、值得注意的發現（引用具體數字）${a.groups ? "、分組差異" : ""}，以及可行的建議。不要重複列出所有數字，不要使用破折號。${open ? "\n【開放題歸納】把開放題意見歸納成 3–6 個主題，每個主題說明代表性看法與大約則數。" : ""}\n只輸出上述段落，各段以【】標題開頭。\n\n# 統計結果\n${statsForAI(a)}${open ? `\n\n# 開放題意見\n${compactText(open).slice(0, 30000)}` : ""}`;
+        const { text } = await generate({ prompt, maxTokens: 3000 }, onText, signal);
+        const m = /【開放題歸納】([\s\S]*)$/.exec(text);
+        openSummary = m ? m[1].trim() : "";
+        narrative = (m ? text.slice(0, m.index) : text).replace(/【分析摘要】/, "").trim();
+      }
+      const title = render(node.title || "問卷分析報告", vars).trim() || "問卷分析報告";
+      const md = surveyMarkdown(a, { title, narrative, openSummary });
+      const images = {};
+      const svgs = {};
+      for (const [i, q] of a.questions.entries()) {
+        const svg = chartFor(q);
+        if (!svg) continue;
+        svgs[`chart:${i}`] = svg;
+        const png = await svgToPng(svg);
+        const m = await sharp(png).metadata();
+        images[`chart:${i}`] = { data: png, width: Math.round(m.width / 2), height: Math.round(m.height / 2) };
+      }
+      const files = [];
+      const out = (name, data) => {
+        const f = writeOutput(name, data);
+        emit({ type: "file", node: node.id, file: f });
+        files.push(f);
+      };
+      out(`${title}.docx`, await markdownToDocx(md, { images }));
+      out(`${title}-統計表.xlsx`, await surveyXlsx(a));
+      const tokens = [];
+      const htmlMd = md.replace(/^!\[([^\]]*)\]\((chart:\d+)\)\s*$/gm, (_, cap, id) => {
+        tokens.push(`<figure style="margin:8px 0">${svgs[id] || ""}<figcaption style="text-align:center">${cap.replace(/[<>&]/g, "")}</figcaption></figure>`);
+        return `@@FIG${tokens.length - 1}@@`;
+      });
+      const body = miniMarkdown(htmlMd).replace(/(?:<p>)?@@FIG(\d+)@@(?:<\/p>)?/g, (_, n) => tokens[n]);
+      out(`${title}.html`, surveyHtml(a, body));
+      log(`已產生 Word、Excel、HTML 報告（${Object.keys(images).length} 張圖表）`);
+      return { __type: "doc", name: title, text: md.replace(/^!\[[^\]]*\]\(chart:\d+\)\s*$/gm, "").replace(/\n{3,}/g, "\n\n"), files };
+    }
+    case "format_check": {
+      const { meta, buf: raw } = getFileRaw(render(node.fileId, vars));
+      let buf = raw;
+      if (meta.ext === ".doc" || meta.ext === ".odt" || meta.ext === ".rtf") {
+        log(`將「${meta.name}」轉為 .docx…`);
+        buf = await convertWithOffice(raw, meta.ext, "docx");
+        if (!buf) throw Object.assign(new Error(`格式檢查需要 .docx 檔。請用 Word 開啟「${meta.name}」後「另存新檔 → Word 文件（.docx）」再上傳（或安裝 LibreOffice 以自動轉換）`), { status: 422 });
+      } else if (meta.ext !== ".docx") throw Object.assign(new Error("格式檢查需要 Word 檔（.docx）。PDF 無法檢查字型與樣式設定，請上傳原始 Word 檔"), { status: 422 });
+      const profile = node.profile || "auto";
+      const r = await checkDocx(buf, profile);
+      const fail = r.results.filter((x) => x.status === "未通過").length;
+      const warn = r.results.filter((x) => x.status === "提醒").length;
+      const typeName = { academic: "學術型報告", project: "計畫成果型報告" }[r.type] || r.type;
+      log(`判斷為${typeName}；${r.results.length} 項檢查：未通過 ${fail} 項、提醒 ${warn} 項`);
+      const base = meta.name.replace(/\.\w+$/, "");
+      let md = resultsToMarkdown(r, `「${base}」格式檢查`);
+      const files = [];
+      if (node.fix) {
+        const fixed = await fixDocx(buf);
+        const f = writeOutput(`${base}-格式修正.docx`, fixed.buf);
+        emit({ type: "file", node: node.id, file: f });
+        files.push(f);
+        const r2 = await checkDocx(fixed.buf, profile);
+        const fail2 = r2.results.filter((x) => x.status === "未通過").length;
+        log(`已自動修正 ${fixed.changedParagraphs} 個段落與樣式；修正後未通過 ${fail2} 項`);
+        md += `\n\n## 自動修正結果\n\n已另存「${base}-格式修正.docx」：修正 ${fixed.changedParagraphs} 個段落及內文、標題、圖表標題樣式的字型字級、對齊、行距與全半形，並設定開檔時更新功能變數。未通過項目由 ${fail} 項減為 ${fail2} 項。\n\n仍需人工處理的項目：\n\n${r2.results.filter((x) => x.status === "未通過").map((x) => `- ${x.item}：${x.detail}`).join("\n") || "（無）"}`;
+      }
+      return { __type: "check", markdown: md, text: compactText(r.text).slice(0, 20000), type: typeName, fail, warn, files };
+    }
+    case "pdf_tool": {
+      const R = (k) => render(node[k] ?? "", vars).trim();
+      const op = node.op || "merge";
+      const ids = String(render(node.fileIds, vars)).split(/[,\s]+/).filter(Boolean);
+      if (!ids.length) throw Object.assign(new Error("請選擇檔案"), { status: 400 });
+      const items = ids.map((id) => {
+        const { meta, buf } = getFileRaw(id);
+        return { name: meta.name, ext: meta.ext, buf };
+      });
+      if (op === "images") {
+        const bad = items.find((x) => !IMAGE_INPUT.includes(x.ext));
+        if (bad) throw Object.assign(new Error(`「${bad.name}」不是圖片`), { status: 422 });
+      } else {
+        const bad = items.find((x) => x.ext !== ".pdf");
+        if (bad) throw Object.assign(new Error(`「${bad.name}」不是 PDF 檔${IMAGE_INPUT.includes(bad.ext) ? "（圖片請使用「圖片轉 PDF」功能）" : ""}`), { status: 422 });
+        if (op !== "merge" && items.length > 1) log(`此功能一次處理一個檔案，將分別處理 ${items.length} 個檔案`);
+      }
+      const base = render(node.filename || "PDF", vars).trim() || "PDF";
+      const outs = [];
+      const kb = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+      const lines = [];
+      const stem = (it) => (items.length > 1 ? it.name.replace(/\.pdf$/i, "") : base);
+      if (op === "merge") {
+        const r = await pdf.mergePdfs(items);
+        outs.push({ name: `${base}.pdf`, buf: r.buf });
+        lines.push(`合併 ${items.length} 個檔案（${items.map((x) => x.name).join("、")}），共 ${r.pages} 頁。`);
+      } else if (op === "images") {
+        const r = await pdf.imagesToPdf(items, { pageSize: R("pageSize") || "a4" });
+        outs.push({ name: `${base}.pdf`, buf: r.buf });
+        lines.push(`${items.length} 張圖片轉成 ${r.pages} 頁 PDF。`);
+      } else {
+        for (const it of items) {
+          if (op === "split") {
+            const parts = await pdf.splitPdf(it.buf, { mode: node.splitMode, every: node.every, ranges: render(node.ranges || "", vars), name: it.name });
+            parts.forEach((p) => outs.push({ name: `${stem(it)}-第${p.label}頁.pdf`, buf: p.buf }));
+            lines.push(`「${it.name}」分割成 ${parts.length} 個檔案。`);
+          } else if (op === "extract") {
+            const r = await pdf.extractPages(it.buf, render(node.ranges || "", vars), it.name);
+            outs.push({ name: `${stem(it)}-擷取.pdf`, buf: r.buf });
+            lines.push(`「${it.name}」（${r.total} 頁）擷取 ${r.pages} 頁。`);
+          } else if (op === "delete") {
+            if (!render(node.ranges || "", vars).trim()) throw Object.assign(new Error("請輸入要刪除的頁碼"), { status: 400 });
+            const r = await pdf.deletePages(it.buf, render(node.ranges, vars), it.name);
+            outs.push({ name: `${stem(it)}-刪頁.pdf`, buf: r.buf });
+            lines.push(`「${it.name}」刪除 ${r.total - r.pages} 頁，剩 ${r.pages} 頁。`);
+          } else if (op === "rotate") {
+            const r = await pdf.rotatePdf(it.buf, node.angle, render(node.ranges || "", vars), it.name);
+            outs.push({ name: `${stem(it)}-旋轉.pdf`, buf: r.buf });
+            lines.push(`「${it.name}」旋轉 ${r.pages} 頁。`);
+          } else if (op === "watermark") {
+            const r = await pdf.watermarkPdf(it.buf, { text: render(node.text || "", vars), tile: !!node.tile, opacity: R("opacity"), size: R("size"), color: R("color") || "gray", name: it.name });
+            outs.push({ name: `${stem(it)}-浮水印.pdf`, buf: r.buf });
+            lines.push(`「${it.name}」${r.pages} 頁已加上浮水印。`);
+          } else if (op === "pagenum") {
+            const r = await pdf.addPageNumbers(it.buf, { format: render(node.text || "", vars).trim() || "{n}", position: node.position, skipFirst: !!node.skipFirst, name: it.name });
+            outs.push({ name: `${stem(it)}-頁碼.pdf`, buf: r.buf });
+            lines.push(`「${it.name}」${r.pages} 頁已加上頁碼。`);
+          } else if (op === "compress") {
+            log(`壓縮「${it.name}」中…`);
+            const r = await pdf.compressPdf(it.buf, { level: node.level, name: it.name });
+            outs.push({ name: `${stem(it)}-壓縮.pdf`, buf: r.buf });
+            lines.push(`「${it.name}」${kb(r.before)} → ${kb(r.after)}（減少 ${Math.max(0, Math.round((1 - r.after / r.before) * 100))}%，${r.method}）。`);
+            if (!r.ghostscript && r.after > r.before * 0.9) lines.push("（此檔以文字、向量為主，可壓縮空間有限；若安裝 Ghostscript，系統會自動使用以取得更好的壓縮效果。）");
+          } else throw Object.assign(new Error(`未知的 PDF 功能：${op}`), { status: 400 });
+        }
+      }
+      lines.forEach((l) => log(l));
+      const files = [];
+      if (outs.length > 1) {
+        const zip = new JSZip();
+        const used = new Set();
+        for (const o of outs) {
+          let n = o.name;
+          for (let k = 2; used.has(n); k++) n = o.name.replace(/\.pdf$/, `-${k}.pdf`);
+          used.add(n);
+          zip.file(n, o.buf);
+        }
+        const f = writeOutput(`${base}.zip`, await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" }));
+        emit({ type: "file", node: node.id, file: f });
+        files.push(f);
+      } else {
+        const f = writeOutput(outs[0].name, outs[0].buf);
+        emit({ type: "file", node: node.id, file: f });
+        files.push(f);
+      }
+      return { __type: "files", files, markdown: `# PDF 處理結果（${PDF_OPS[op]}）\n\n${lines.map((l) => "- " + l).join("\n")}${outs.length > 1 ? `\n\n共 ${outs.length} 個檔案，已打包成 ZIP。` : ""}` };
+    }
+    case "image_batch": {
+      const ids = String(render(node.fileIds, vars)).split(/[,\s]+/).filter(Boolean);
+      if (!ids.length) throw Object.assign(new Error("請選擇圖片"), { status: 400 });
+      const items = ids.map((id) => {
+        const { meta, buf } = getFileRaw(id);
+        if (!IMAGE_INPUT.includes(meta.ext)) throw Object.assign(new Error(`「${meta.name}」不是圖片。支援：${IMAGE_INPUT.join("、")}`), { status: 422 });
+        return { name: meta.name, buf };
+      });
+      const r = await batchImages(items, { width: node.width, height: node.height, percent: node.percent, format: node.format, quality: node.quality, maxKB: node.maxKB, keepMeta: !!node.keepMeta }, { log });
+      const base = render(node.filename || "圖片", vars).trim() || "圖片";
+      const files = [];
+      if (r.results.length === 1) files.push(writeOutput(r.results[0].name, r.results[0].buf));
+      else {
+        const zip = new JSZip();
+        for (const x of r.results) zip.file(x.name, x.buf);
+        files.push(writeOutput(`${base}.zip`, await zip.generateAsync({ type: "nodebuffer" })));
+      }
+      files.forEach((f) => emit({ type: "file", node: node.id, file: f }));
+      return { __type: "files", files, markdown: r.markdown };
     }
     case "read_file": {
       const { meta, text } = getFileText(render(node.fileId, vars));

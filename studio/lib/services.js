@@ -5,6 +5,7 @@
 //   text / textarea / url / number / select / checkbox
 //   doc   ：文件來源（上傳檔案、檔案庫、貼上文字、網址任選），執行前會先轉成文字
 //   file  ：原始檔案（給文字辨識、資料分析），值為檔案庫 id
+//   files ：多個原始檔案（PDF 工具、圖片批次處理），值為以逗號分隔的檔案庫 id，順序即處理順序
 //   kb    ：知識庫
 // ai：none＝不使用 AI（不花用量）／light＝少量／normal＝一般／claude＝需要 Claude
 //     speech＝需要語音轉文字服務／imagegen＝需要圖片生成服務
@@ -15,6 +16,7 @@ export const CATEGORIES = [
   { id: "docs", name: "文件與資料", desc: "文字辨識、翻譯、擷取表格、資料分析、格式轉換" },
   { id: "media", name: "影音與圖片", desc: "錄音轉逐字稿、會議錄音整理、圖片分析、AI 生成圖片、簡報講稿" },
   { id: "web", name: "網站與資訊", desc: "網站檢測、網頁監控、新聞摘要、網路研究" },
+  { id: "tools", name: "PDF 與圖片工具", desc: "合併、分割、浮水印、頁碼、壓縮 PDF，圖片批次縮放與轉檔（不使用 AI）" },
 ];
 
 const FORMAL_SYSTEM = "你是熟悉中華民國（臺灣）政府與學校行政作業的文書人員。一律使用臺灣慣用的繁體中文與正式書面用語，不使用簡體字或中國大陸用語。";
@@ -276,7 +278,7 @@ export const SERVICES = [
     name: "掃描文件文字辨識",
     desc: "將掃描型 PDF、拍照的文件或截圖轉成可編輯的文字（含表格），輸出 Word 檔。",
     ai: "claude",
-    notes: ["PDF 需要使用 Claude；圖片也可使用支援影像的 OpenAI 相容模型。", "每頁約需 1,500–3,000 token，頁數多時用量較大。", "單一檔案上限 25 MB。"],
+    notes: ["PDF 需要使用 Claude；圖片也可使用支援影像的 OpenAI 相容模型。", "每頁約需 1,500–3,000 token，頁數多時用量較大。", "單一檔案上限 25 MB；過大的圖片會自動縮小。"],
     fields: [
       { key: "file", label: "掃描檔或圖片", type: "file", required: true, accept: ".pdf,.png,.jpg,.jpeg,.webp,.gif" },
       { key: "hint", label: "補充說明（選填）", type: "text", placeholder: "例：這是手寫筆記；表格請保留欄位" },
@@ -358,7 +360,7 @@ export const SERVICES = [
     ai: "speech",
     notes: [
       "需在系統設定選擇「語音轉文字」服務：OpenAI（Whisper／gpt-4o-transcribe）、Groq（速度快、價格低）、Gemini 或 OpenRouter。Claude 無法直接處理音檔。",
-      "單一音檔上限 25 MB（MP3 64 kbps 約可容納 50 分鐘）；更長的錄音請先分段。",
+      "長錄音會自動轉成語音專用格式（約每小時 14 MB），超過上限時自動分段轉錄再接起來，不需自行切檔（使用內建的 ffmpeg）。",
       "時間標記與字幕檔需使用 Whisper 模型（OpenAI 或 Groq）。選擇繁體中文時，結果會自動轉為臺灣用語。",
     ],
     fields: [
@@ -379,7 +381,7 @@ export const SERVICES = [
     name: "會議錄音整理",
     desc: "上傳會議錄音，自動轉成逐字稿後整理為正式會議紀錄（含決議與待辦），輸出 Word 檔。",
     ai: "speech",
-    notes: ["需設定「語音轉文字」服務；整理會議紀錄使用文字 AI。", "單一音檔上限 25 MB。"],
+    notes: ["需設定「語音轉文字」服務；整理會議紀錄使用文字 AI。", "長錄音會自動分段轉錄。"],
     fields: [
       { key: "file", label: "會議錄音", type: "file", required: true, accept: ".mp3,.m4a,.wav,.webm,.ogg,.flac,.mp4,.aac" },
       { key: "title", label: "會議名稱", type: "text", required: true },
@@ -426,7 +428,7 @@ export const SERVICES = [
     ai: "normal",
     notes: ["需使用支援圖片的模型：Claude、OpenAI、Gemini、OpenRouter（依模型）或 Ollama 的視覺模型。", "若要把圖片中的文字完整轉出，請改用「掃描文件文字辨識」。"],
     fields: [
-      { key: "file", label: "圖片", type: "file", required: true, accept: ".png,.jpg,.jpeg,.webp,.gif" },
+      { key: "file", label: "圖片", type: "file", required: true, accept: ".png,.jpg,.jpeg,.webp,.gif,.tif,.tiff,.bmp,.avif,.svg" },
       {
         key: "task",
         label: "要做什麼",
@@ -599,6 +601,184 @@ export const SERVICES = [
       { id: "add", type: "kb_add", kbId: "{{form.kb}}", source: "{{site}}", title: "{{form.url}}", out: "kbResult" },
     ],
   },
+
+  // ======================= 文件與資料：問卷 =======================
+  {
+    id: "survey-analysis",
+    cat: "docs",
+    name: "問卷結果分析",
+    desc: "上傳 Google 表單（或其他問卷系統）匯出的 CSV／Excel，自動判斷單選、複選、量表、開放題，產生統計表、長條圖與 Word／Excel／HTML 報告。",
+    ai: "none",
+    notes: [
+      "統計與圖表在本機計算，不使用 AI；勾選「AI 分析摘要」時，只把統計結果與開放題意見送給 AI，不送出原始資料。",
+      "姓名、Email、學號、電話等個人資料欄位會自動排除，不列入分析也不送給 AI。",
+      "Google 表單：回覆 → 「在試算表中查看」或右上角「⋮ → 下載回覆（.csv）」。",
+      "複選題的百分比以填答人數為分母，加總可能超過 100%。",
+    ],
+    fields: [
+      { key: "file", label: "問卷回覆檔（.csv / .xlsx）", type: "file", required: true, accept: ".csv,.xlsx,.xls,.ods,.tsv" },
+      { key: "title", label: "報告標題", type: "text", default: "問卷分析報告", placeholder: "例：114 學年度新生座談會滿意度調查" },
+      { key: "group", label: "分組比較欄位（選填）", type: "text", placeholder: "填入題目名稱，例：身分別；會依此比較各組的量表平均" },
+      { key: "ai", label: "AI 分析摘要（選填，會使用 AI）", type: "checkbox", default: false, help: "由 AI 依統計結果撰寫重點發現與建議，並歸納開放題意見。" },
+    ],
+    nodes: [{ id: "survey", type: "survey", fileId: "{{form.file}}", group: "{{form.group}}", title: "{{form.title}}", ai: "{{form.ai}}", out: "survey" }],
+  },
+  // ======================= 報告格式檢查 =======================
+  {
+    id: "report-format-check",
+    cat: "research",
+    name: "計畫書／成果報告格式檢查",
+    desc: "依國科會計畫報告、縣市政府計畫成果報告的常見格式，逐項檢查 Word 檔的字型字級、對齊行距、標號層級、章節架構、圖表標題、目錄、用語與參考文獻，並可自動修正。",
+    ai: "none",
+    notes: [
+      "檢查在本機進行，不使用 AI；勾選「AI 用語與內容審閱」才會呼叫 AI。",
+      "請上傳原始 Word 檔（.docx）；PDF 無法檢查字型與樣式。舊版 .doc 需安裝 LibreOffice 才能自動轉換。",
+      "自動修正只處理字型、字級、對齊、行距、全半形與功能變數更新；章節架構、標號、圖表位置、口語用詞需依檢查結果人工修改。",
+      "檢查依據：內文標楷體＋Times New Roman 12pt、章標題 16pt 粗體、節標題 14pt 粗體、圖表標題 14pt、兩端對齊、固定行高約 1.5 倍；表標題在上、圖標題在下，編號如「圖1-1」。各機關另有規定時以其規定為準。",
+    ],
+    fields: [
+      { key: "file", label: "報告檔（.docx）", type: "file", required: true, accept: ".docx,.doc,.odt" },
+      { key: "profile", label: "報告類型", type: "select", options: { auto: "自動判斷", academic: "學術型（國科會計畫、研究報告）", project: "計畫成果型（縣市計畫、委託勞務採購案）" }, default: "auto" },
+      { key: "fix", label: "自動修正", type: "checkbox", default: true, help: "另存一份修正後的 Word 檔，原檔不會被修改。" },
+      { key: "ai", label: "AI 用語與內容審閱（選填，會使用 AI）", type: "checkbox", default: false, help: "檢查口語用詞、自稱是否一致、段落是否通順，列出建議修改處。" },
+    ],
+    nodes: [
+      { id: "check", type: "format_check", fileId: "{{form.file}}", profile: "{{form.profile}}", fix: "{{form.fix}}", out: "check" },
+      {
+        id: "review",
+        type: "llm",
+        when: "{{form.ai}}",
+        light: true,
+        system: "你是熟悉臺灣學術與政府計畫報告寫作規範的審稿人員，使用臺灣繁體中文。",
+        prompt:
+          "請審閱以下報告內文的用語，列出需要修改之處（每項：原文 → 建議修改，並簡述理由）。檢查重點：口語用詞（我們、大概、差不多、搞定等）、自稱是否一致（學術型用「本研究」，計畫型用「本計畫」）、破折號、半形標點、語意不清或過長的句子、前後數字不一致。最多列 30 項，依出現順序排列；沒有問題就說明「未發現明顯用語問題」。\n\n報告類型：{{check.type}}\n\n{{check.text}}",
+        out: "ai",
+      },
+      { id: "join", type: "set", value: "{{check}}\n\n{{ai}}", out: "text" },
+      { id: "save", type: "save_file", source: "{{text}}", format: "docx", filename: "格式檢查結果-{{today}}", out: "file" },
+    ],
+  },
+  // ======================= PDF 與圖片工具 =======================
+  {
+    id: "pdf-merge",
+    cat: "tools",
+    name: "PDF 合併",
+    desc: "把多個 PDF 依選擇順序合併成一個檔案。",
+    ai: "none",
+    notes: ["檔案順序即合併順序，可在清單中調整。", "有密碼保護的 PDF 需先解除密碼。"],
+    fields: [
+      { key: "files", label: "PDF 檔案（2 個以上）", type: "files", required: true, accept: ".pdf", min: 2 },
+      { key: "filename", label: "合併後檔名", type: "text", default: "合併檔-{{today}}" },
+    ],
+    nodes: [{ id: "pdf", type: "pdf_tool", op: "merge", fileIds: "{{form.files}}", filename: "{{form.filename}}", out: "pdf" }],
+  },
+  {
+    id: "pdf-split",
+    cat: "tools",
+    name: "PDF 分割",
+    desc: "把一個 PDF 拆成多個檔案：每頁一檔、每 N 頁一檔，或依自訂範圍分組，打包成 ZIP 下載。",
+    ai: "none",
+    notes: ["自訂範圍用分號分隔各檔，例如「1-3; 4-10; 11-」會產生 3 個檔案。"],
+    fields: [
+      { key: "files", label: "PDF 檔案", type: "files", required: true, accept: ".pdf" },
+      { key: "mode", label: "分割方式", type: "select", options: { each: "每頁一個檔", every: "每 N 頁一個檔", ranges: "依自訂範圍" }, default: "each" },
+      { key: "every", label: "每幾頁一個檔", type: "number", default: 2, help: "分割方式選「每 N 頁一個檔」時使用。" },
+      { key: "ranges", label: "自訂範圍", type: "text", placeholder: "例：1-3; 4-10; 11-", help: "分割方式選「依自訂範圍」時使用。" },
+    ],
+    nodes: [{ id: "pdf", type: "pdf_tool", op: "split", fileIds: "{{form.files}}", splitMode: "{{form.mode}}", every: "{{form.every}}", ranges: "{{form.ranges}}", filename: "分割-{{today}}", out: "pdf" }],
+  },
+  {
+    id: "pdf-pages",
+    cat: "tools",
+    name: "PDF 頁面整理",
+    desc: "擷取指定頁面、調整頁面順序、刪除頁面或旋轉頁面。",
+    ai: "none",
+    notes: ["頁碼寫法：「1-3, 5, 8-」（8- 表示第 8 頁到最後）、「末頁」；擷取時依輸入順序排列，例如「3, 1, 2」可調整順序。", "旋轉時頁碼留空表示全部頁面。"],
+    fields: [
+      { key: "files", label: "PDF 檔案", type: "files", required: true, accept: ".pdf" },
+      { key: "op", label: "動作", type: "select", options: { extract: "擷取／重新排序頁面", delete: "刪除頁面", rotate: "旋轉頁面" }, default: "extract" },
+      { key: "ranges", label: "頁碼", type: "text", placeholder: "例：1-3, 5, 8-" },
+      { key: "angle", label: "旋轉角度", type: "select", options: { 90: "順時針 90°", 180: "180°", 270: "逆時針 90°" }, default: "90" },
+    ],
+    nodes: [{ id: "pdf", type: "pdf_tool", op: "{{form.op}}", fileIds: "{{form.files}}", ranges: "{{form.ranges}}", angle: "{{form.angle}}", filename: "頁面整理-{{today}}", out: "pdf" }],
+  },
+  {
+    id: "pdf-watermark",
+    cat: "tools",
+    name: "PDF 加浮水印",
+    desc: "在每一頁加上文字浮水印（支援中文），例如「機密」「草稿」「僅供審查使用」。",
+    ai: "none",
+    notes: ["浮水印為半透明斜向文字，可選擇置中一個或鋪滿整頁。", "可輸入兩行文字（以換行分隔）。"],
+    fields: [
+      { key: "files", label: "PDF 檔案", type: "files", required: true, accept: ".pdf" },
+      { key: "text", label: "浮水印文字", type: "textarea", rows: 2, required: true, default: "僅供審查使用" },
+      { key: "tile", label: "鋪滿整頁", type: "checkbox", default: false },
+      { key: "color", label: "顏色", type: "select", options: { gray: "灰色", red: "紅色", blue: "藍色", black: "黑色" }, default: "gray" },
+      { key: "opacity", label: "透明度", type: "select", options: { "0.12": "淡", "0.2": "中", "0.35": "深" }, default: "0.2" },
+      { key: "size", label: "字級（pt）", type: "number", default: 48 },
+    ],
+    nodes: [{ id: "pdf", type: "pdf_tool", op: "watermark", fileIds: "{{form.files}}", text: "{{form.text}}", tile: "{{form.tile}}", color: "{{form.color}}", opacity: "{{form.opacity}}", size: "{{form.size}}", filename: "浮水印-{{today}}", out: "pdf" }],
+  },
+  {
+    id: "pdf-pagenum",
+    cat: "tools",
+    name: "PDF 加頁碼",
+    desc: "在每一頁加上頁碼，可自訂格式（例如「第 1 頁，共 10 頁」）與位置，封面可不加。",
+    ai: "none",
+    notes: ["格式中 {n} 代表頁碼、{total} 代表總頁數。"],
+    fields: [
+      { key: "files", label: "PDF 檔案", type: "files", required: true, accept: ".pdf" },
+      { key: "format", label: "頁碼格式", type: "select", options: { "{n}": "1", "- {n} -": "- 1 -", "{n} / {total}": "1 / 10", "第 {n} 頁": "第 1 頁", "第 {n} 頁，共 {total} 頁": "第 1 頁，共 10 頁" }, default: "{n}" },
+      { key: "position", label: "位置", type: "select", options: { "bottom-center": "下方置中", "bottom-right": "右下角", "top-right": "右上角" }, default: "bottom-center" },
+      { key: "skipFirst", label: "封面不加頁碼", type: "checkbox", default: false },
+    ],
+    nodes: [{ id: "pdf", type: "pdf_tool", op: "pagenum", fileIds: "{{form.files}}", text: "{{form.format}}", position: "{{form.position}}", skipFirst: "{{form.skipFirst}}", filename: "頁碼-{{today}}", out: "pdf" }],
+  },
+  {
+    id: "pdf-compress",
+    cat: "tools",
+    name: "PDF 壓縮",
+    desc: "降低 PDF 檔案大小，方便以 Email 寄送或上傳系統（掃描檔、含照片的檔案效果最明顯）。",
+    ai: "none",
+    notes: ["主要壓縮內嵌的圖片（降低解析度與 JPEG 品質）；純文字 PDF 可壓縮的空間有限。", "若電腦已安裝 Ghostscript，系統會自動使用以取得更好的效果。", "壓縮後若比原檔大，會保留原檔。"],
+    fields: [
+      { key: "files", label: "PDF 檔案", type: "files", required: true, accept: ".pdf" },
+      { key: "level", label: "壓縮程度", type: "select", options: { low: "輕度（品質優先，200 dpi）", medium: "中度（建議，150 dpi）", high: "高度（檔案最小，100 dpi）" }, default: "medium" },
+    ],
+    nodes: [{ id: "pdf", type: "pdf_tool", op: "compress", fileIds: "{{form.files}}", level: "{{form.level}}", filename: "壓縮-{{today}}", out: "pdf" }],
+  },
+  {
+    id: "images-to-pdf",
+    cat: "tools",
+    name: "圖片轉 PDF",
+    desc: "把多張圖片（照片、掃描、截圖）依順序合成一個 PDF，每張一頁。",
+    ai: "none",
+    notes: ["A4 版面會依圖片方向自動選擇直式或橫式，並保留邊界。", "手機照片會依拍攝方向自動轉正。"],
+    fields: [
+      { key: "files", label: "圖片", type: "files", required: true, accept: ".jpg,.jpeg,.png,.webp,.gif,.tif,.tiff,.bmp,.avif,.svg,.heic" },
+      { key: "pageSize", label: "頁面大小", type: "select", options: { a4: "A4（置中）", fit: "與圖片相同" }, default: "a4" },
+      { key: "filename", label: "檔名", type: "text", default: "圖片-{{today}}" },
+    ],
+    nodes: [{ id: "pdf", type: "pdf_tool", op: "images", fileIds: "{{form.files}}", pageSize: "{{form.pageSize}}", filename: "{{form.filename}}", out: "pdf" }],
+  },
+  {
+    id: "image-batch",
+    cat: "tools",
+    name: "圖片批次處理",
+    desc: "一次縮放、轉格式、壓縮多張圖片，並移除拍攝資訊（含 GPS 位置）；多張會打包成 ZIP。",
+    ai: "none",
+    notes: ["寬、高留空表示不縮放；只填寬度會依比例調整高度；不會把小圖放大。", "預設移除 EXIF 拍攝資訊（相機型號、GPS 位置等），上傳網站前建議保持。", "HEIC（iPhone 照片）目前無法讀取，請先轉成 JPG。"],
+    fields: [
+      { key: "files", label: "圖片", type: "files", required: true, accept: ".jpg,.jpeg,.png,.webp,.gif,.tif,.tiff,.bmp,.avif,.svg,.heic" },
+      { key: "width", label: "最大寬度（像素）", type: "number", placeholder: "例：1920" },
+      { key: "height", label: "最大高度（像素）", type: "number", placeholder: "留空則依比例" },
+      { key: "format", label: "輸出格式", type: "select", options: { keep: "維持原格式", jpg: "JPG（照片，檔案小）", png: "PNG（截圖、需透明背景）", webp: "WebP（網頁用，最小）" }, default: "keep" },
+      { key: "quality", label: "品質（10–100）", type: "number", default: 80 },
+      { key: "maxKB", label: "每張大小上限（KB，選填）", type: "number", placeholder: "例：500（報名系統常見限制）" },
+      { key: "keepMeta", label: "保留拍攝資訊", type: "checkbox", default: false },
+    ],
+    nodes: [{ id: "img", type: "image_batch", fileIds: "{{form.files}}", width: "{{form.width}}", height: "{{form.height}}", format: "{{form.format}}", quality: "{{form.quality}}", maxKB: "{{form.maxKB}}", keepMeta: "{{form.keepMeta}}", filename: "圖片-{{today}}", out: "images" }],
+  },
 ];
 
 export function getService(id) {
@@ -613,6 +793,12 @@ export function validateForm(service, form) {
   for (const f of service.fields) {
     const v = form?.[f.key];
     const empty = v == null || v === "" || (typeof v === "object" && !v.fileId && !v.text?.trim() && !v.url?.trim() && !v.file);
+    if (f.type === "files") {
+      const n = (Array.isArray(v) ? v : String(v ?? "").split(",")).filter((x) => String(x).trim()).length;
+      if (f.required && !n) errors.push(`請選擇「${f.label}」`);
+      else if (f.min && n && n < f.min) errors.push(`「${f.label}」至少需要 ${f.min} 個檔案`);
+      continue;
+    }
     if (f.required && empty) errors.push(`請填寫「${f.label}」`);
     if (f.type === "url" && v && !/^https?:\/\/|^[\w-]+(\.[\w-]+)+/.test(String(v).trim())) errors.push(`「${f.label}」不是有效的網址`);
   }
